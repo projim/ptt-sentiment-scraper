@@ -5,13 +5,32 @@ import json
 import time
 import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware  # [FIX] 引入 CORS 中介層
 from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 
+# --- FastAPI App ---
+app = FastAPI()
+
+# --- [FIX] CORS Middleware Configuration ---
+# 設定允許存取您後端 API 的前端網址來源
+origins = [
+    "https://projim.github.io",  # 您的 GitHub Pages 網址
+    "http://localhost",         # 用於本地開發測試
+    "http://127.0.0.1",       # 用於本地開發測試
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],  # 允許所有 HTTP 方法 (GET, POST, etc.)
+    allow_headers=["*"],  # 允許所有 HTTP 標頭
+)
+
 # --- Database Setup (SQLAlchemy) ---
-# 從環境變數讀取 Render 提供的內部資料庫 URL
 DATABASE_URL = os.environ.get('DATABASE_URL')
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -20,18 +39,14 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# 定義資料庫中的資料表結構
 class PniRecord(Base):
     __tablename__ = "pni_records"
     id = Column(Integer, primary_key=True, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     pni = Column(Float, index=True)
 
-# 應用啟動時創建資料表
 Base.metadata.create_all(bind=engine)
 
-# --- FastAPI App ---
-app = FastAPI()
 
 # --- PTT Scraper (Deep Scrape Logic) ---
 PTT_URL = "https://www.ptt.cc"
@@ -44,7 +59,6 @@ def deep_scrape_pni():
     深度分析：進入每篇文章內頁，精準計算 PNI。
     """
     try:
-        # 1. 爬取列表頁，取得文章網址
         response = requests.get(GOSSIPING_BOARD_URL, cookies=cookies, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
@@ -54,25 +68,18 @@ def deep_scrape_pni():
         total_push = 0
         total_boo = 0
         
-        # 2. 逐一進入文章內頁
         for url in article_urls:
             try:
-                # 加入延遲，避免請求過於頻繁
                 time.sleep(0.5) 
-                
                 article_res = requests.get(url, cookies=cookies, headers=headers, timeout=10)
                 article_soup = BeautifulSoup(article_res.text, 'html.parser')
-                
-                # 3. 計算內頁的推噓文數
                 pushes = article_soup.find_all('span', class_='push-tag', string=lambda text: '推' in text)
                 boos = article_soup.find_all('span', class_='push-tag', string=lambda text: '噓' in text)
-                
                 total_push += len(pushes)
                 total_boo += len(boos)
             except Exception as e:
                 print(f"[警告] 爬取內頁 {url} 失敗: {e}")
 
-        # 4. 計算這一批文章的總 PNI
         total_votes = total_push + total_boo
         pni = (total_boo / total_votes) * 100 if total_votes > 0 else 0
         
@@ -86,7 +93,9 @@ def deep_scrape_pni():
         print(f"[錯誤] 爬取列表頁失敗: {e}")
         return None
 
-# --- WebSocket Connection Manager ---
+pni_calculator = PNI_Calculator()
+
+# --- WebSocket Connection Manager & Background Task ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
@@ -101,13 +110,11 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# --- Background Task for Scraping and Broadcasting ---
 async def scrape_and_save_periodically():
     while True:
         pni = deep_scrape_pni()
         
         if pni is not None:
-            # 1. 將新數據存入資料庫
             db = SessionLocal()
             try:
                 new_record = PniRecord(pni=pni)
@@ -120,12 +127,10 @@ async def scrape_and_save_periodically():
             finally:
                 db.close()
 
-            # 2. 廣播最新數據
             message = json.dumps({"type": "pni_update", "timestamp": time.time(), "pni": pni})
             await manager.broadcast(message)
             print(f"已廣播最新 PNI 數據。")
         
-        # 將爬取週期拉長為 3 分鐘 (180秒)，以確保穩定性
         await asyncio.sleep(180)
 
 # --- API Endpoints ---
@@ -149,9 +154,6 @@ def get_history(timescale: str = "30m"):
             start_time = datetime.utcnow() - timedelta(days=30)
             
         records = db.query(PniRecord).filter(PniRecord.timestamp >= start_time).order_by(desc(PniRecord.timestamp)).all()
-        
-        # 這部分可以在前端做，但為了示範，這裡也可以做簡單的彙總
-        # 為保持簡單，我們先回傳原始數據點，讓前端處理
         return [{"timestamp": r.timestamp.isoformat(), "pni": r.pni} for r in records]
 
     except SQLAlchemyError as e:
