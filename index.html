@@ -7,6 +7,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <!-- [FIX] 重新加入遺漏的 date-fns 日期處理函式庫 -->
     <script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/cdn.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
@@ -81,13 +82,78 @@
         let baselinePni = 0;
         let ws;
         let isConnected = false;
-        let realtimePniHistory = []; // 只儲存即時數據
+        let realtimePniHistory = [];
 
         const serviceName = "ptt-gossiping-live"; // 請換成您在 Render 上設定的服務名稱
         const API_BASE_URL = `https://${serviceName}.onrender.com`;
         const WEBSOCKET_URL = `wss://${serviceName}.onrender.com/ws`;
         
-        const chartConfig = { /* ... (Chart.js configuration remains the same) ... */ };
+        const chartConfig = {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: '負面情緒趨勢',
+                    data: [],
+                    borderColor: 'rgba(255, 255, 255, 0.5)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.4,
+                    fill: true,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {},
+                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                        ticks: { color: 'rgba(255, 255, 255, 0.7)' }
+                    },
+                    y: {
+                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                        ticks: {
+                            color: 'rgba(255, 255, 255, 0.7)',
+                            callback: value => value.toFixed(0) + '%'
+                        },
+                        title: {
+                            display: true,
+                            text: '趨勢 (與基準比較)',
+                            color: 'rgba(255, 255, 255, 0.9)'
+                        }
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: context => `趨勢: ${context.parsed.y.toFixed(1)}%`
+                        }
+                    },
+                    annotation: {
+                        annotations: {
+                            baseline: {
+                                type: 'line',
+                                yMin: 0,
+                                yMax: 0,
+                                borderColor: 'rgba(255, 255, 0, 0.7)',
+                                borderWidth: 2,
+                                borderDash: [6, 6],
+                                label: {
+                                    content: '基準線',
+                                    enabled: true,
+                                    position: 'end',
+                                    backgroundColor: 'rgba(255, 255, 0, 0.7)',
+                                    color: 'black',
+                                    font: { weight: 'bold' }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
 
         function connectWebSocket() {
             ws = new WebSocket(WEBSOCKET_URL);
@@ -113,8 +179,26 @@
                     lastUpdatedEl.textContent = new Date().toLocaleTimeString('zh-TW');
                 }
             };
-            ws.onclose = () => { /* ... (same as previous version) ... */ };
-            ws.onerror = (error) => { /* ... (same as previous version) ... */ };
+            
+            ws.onclose = () => {
+                console.log("WebSocket 連接已斷開。");
+                connectionDot.classList.remove('text-green-500', 'text-yellow-500');
+                connectionDot.classList.add('text-red-500');
+                if (isConnected) {
+                    isConnected = false;
+                    connectionStatus.textContent = "已斷線，5秒後嘗試重新連接...";
+                    setTimeout(connectWebSocket, 5000);
+                } else {
+                    const errorMsg = `連線失敗。<br><strong class="text-yellow-400">請確認Python後端伺服器已部署並正確運行。</strong>`;
+                    connectionStatus.innerHTML = errorMsg;
+                    loadingText.innerHTML = errorMsg;
+                    analysisText.innerHTML = "無法連接到後端伺服器。請部署 Python 爬蟲程式，然後刷新此頁面。";
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error("WebSocket 發生錯誤:", error);
+            };
         }
 
         function updateActiveChart() {
@@ -205,14 +289,61 @@
             }
         }
         
-        // ... (The rest of the functions like generateBaselinePni, event listeners, and initialize remain the same, but with minor adjustments for the new logic) ...
-        function generateAnalysis(data, mode) { /* ... */ }
-        function generateBaselinePni(dateString) { /* ... */ }
-        baselineDateEl.addEventListener('change', () => { /* ... */ });
-        timeUnitEl.addEventListener('change', updateChart);
-        function initialize() { /* ... */ }
-        initialize();
+        function generateAnalysis(data, mode) {
+            if (!data || data.length === 0) {
+                if(!isConnected) {
+                     analysisText.innerHTML = "無法連接到後端伺服器。請部署 Python 爬蟲程式，然後刷新此頁面。";
+                } else {
+                     analysisText.innerHTML = "正在等待從後端接收即時數據...";
+                }
+                return;
+            }
+            const lastPoint = data[data.length - 1];
+            const peakPoint = data.reduce((max, p) => p.y > max.y ? p : max, data[0]);
+            
+            let analysis = `與基準日 ${baselineDateEl.value} (PNI: ${baselinePni.toFixed(1)}%) 相比，`;
+            if (mode === 'realtime') {
+                analysis += `最近一小時的即時數據顯示，情緒高峰趨勢為 **${peakPoint.y > 0 ? '+' : ''}${peakPoint.y.toFixed(1)}%**。`;
+            } else if (mode === '30m') {
+                analysis += `過去24小時的彙總數據顯示，情緒高峰出現在 **${dateFns.format(peakPoint.x, 'HH:mm')}** 左右，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
+            } else {
+                analysis += `過去3天的彙總數據顯示，情緒高峰出現在 **${dateFns.format(peakPoint.x, 'MM/dd HH:00')}**，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
+            }
+            analysis += ` 目前最新的趨勢指數為 **${lastPoint.y > 0 ? '+' : ''}${lastPoint.y.toFixed(1)}%**。`;
+            analysisText.innerHTML = analysis;
+        }
 
+        function generateBaselinePni(dateString) {
+            let hash = 0;
+            if (!dateString) dateString = new Date().toISOString();
+            for (let i = 0; i < dateString.length; i++) {
+                const char = dateString.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash |= 0;
+            }
+            const pseudoRandom = Math.abs(hash / 2147483647);
+            return 15 + pseudoRandom * 15;
+        }
+
+        baselineDateEl.addEventListener('change', () => {
+            baselinePni = generateBaselinePni(baselineDateEl.value);
+            baselineValueEl.textContent = `${baselinePni.toFixed(1)} %`;
+            updateChart();
+        });
+        timeUnitEl.addEventListener('change', updateChart);
+
+        function initialize() {
+            const today = new Date();
+            const yesterday = new Date(today);
+            yesterday.setDate(today.getDate() - 1);
+            baselineDateEl.value = yesterday.toISOString().split('T')[0];
+            baselinePni = generateBaselinePni(baselineDateEl.value);
+            baselineValueEl.textContent = `${baselinePni.toFixed(1)} %`;
+            
+            connectWebSocket();
+        }
+
+        initialize();
     </script>
 </body>
-</ht
+</html>
