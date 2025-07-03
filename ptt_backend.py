@@ -1,5 +1,4 @@
 import asyncio
-import websockets
 import requests
 from bs4 import BeautifulSoup
 import json
@@ -8,7 +7,6 @@ import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 # --- FastAPI App ---
-# FastAPI 會同時處理 HTTP 和 WebSocket 請求
 app = FastAPI()
 
 # --- PTT Scraper ---
@@ -16,54 +14,69 @@ PTT_URL = "https://www.ptt.cc"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
 cookies = {"over18": "1"}
 
-# 這些變數現在放在一個類別中，方便管理
 class PNI_Calculator:
     def __init__(self):
-        self.push_count = 0
-        self.boo_count = 0
+        self.push_article_count = 0
+        self.boo_article_count = 0
         self.last_calculation_time = time.time()
 
     def get_pni(self):
-        """爬取 PTT 並計算 PNI"""
+        """
+        爬取 PTT 並計算 PNI。
+        新邏輯：計算「噓文文章數」佔「總文章數」的比例，作為情緒指標。
+        """
         try:
-            response = requests.get(GOSSIPING_BOARD_URL, cookies=cookies, timeout=5)
+            # 添加瀏覽器標頭，模擬真人訪問，避免被快取
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(GOSSIPING_BOARD_URL, cookies=cookies, headers=headers, timeout=10)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.text, "html.parser")
             articles = soup.find_all("div", class_="r-ent")
-
+            
+            # 在這個爬取週期內，計算推文和噓文的文章數量
+            current_push_articles = 0
+            current_boo_articles = 0
+            
             for article in articles:
                 push_tag = article.find("div", class_="nrec")
                 if push_tag and push_tag.span:
                     push_str = push_tag.span.string
                     if push_str:
-                        if push_str.startswith('X'):
-                            try:
-                                self.boo_count += int(push_str[1:]) * 10
-                            except (ValueError, TypeError):
-                                self.boo_count += 100
-                        elif push_str.isdigit():
-                            self.push_count += int(push_str)
-                        elif push_str == '爆':
-                            self.push_count += 100
+                        if push_str.startswith('X'): # 任何 'X' 開頭的都算噓文文章
+                            current_boo_articles += 1
+                        elif push_str.isdigit() or push_str == '爆': # 數字或 '爆' 都算推文文章
+                            current_push_articles += 1
             
+            # 累積到全域計數器
+            self.push_article_count += current_push_articles
+            self.boo_article_count += current_boo_articles
+            
+            print(f"本次爬取: {current_push_articles} 推文文章, {current_boo_articles} 噓文文章。累積: {self.push_article_count} 推, {self.boo_article_count} 噓")
+
             current_time = time.time()
             if current_time - self.last_calculation_time > 60:
-                pni = (self.boo_count / (self.push_count + self.boo_count)) * 100 if (self.push_count + self.boo_count) > 0 else 0
+                total_articles = self.push_article_count + self.boo_article_count
+                # PNI 現在是噓文文章的百分比
+                pni = (self.boo_article_count / total_articles) * 100 if total_articles > 0 else 0
                 
-                self.push_count = 0
-                self.boo_count = 0
+                # 重置計數器
+                self.push_article_count = 0
+                self.boo_article_count = 0
                 self.last_calculation_time = current_time
                 
-                print(f"計算出的 PNI: {pni:.2f}%")
+                print(f"--- 每分鐘計算 ---")
+                print(f"總文章數: {total_articles}, PNI (噓文文章比例): {pni:.2f}%")
+                print(f"--------------------")
                 return pni
                 
         except Exception as e:
-            print(f"爬取或計算 PNI 時發生錯誤: {e}")
+            print(f"[錯誤] 爬取或計算 PNI 時發生錯誤: {e}")
             
         return None
 
-# 建立一個 PNI 計算器的實例
 pni_calculator = PNI_Calculator()
 
 # --- WebSocket Connection Manager ---
@@ -120,10 +133,6 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # 保持連接開啟，等待客戶端斷開
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
-# --- To run this app locally, use: uvicorn ptt_backend:app --reload ---
-# On Render, the start command will be: uvicorn ptt_backend:app --host 0.0.0.0 --port 10000
