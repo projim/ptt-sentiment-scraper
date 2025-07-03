@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PTT 八卦版輿情分析平台</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- [FIX] 更換為速度更快的 cdnjs.cloudflare.com CDN -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/2.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/date-fns/2.29.3/date-fns.min.js"></script>
+    <!-- [FIX] 更換為速度更快的 cdnjs.cloudflare.com CDN 並加上 defer 屬性 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/2.0.0/chartjs-adapter-date-fns.bundle.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/date-fns/2.29.3/date-fns.min.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Inter', 'Noto Sans TC', sans-serif; }
@@ -68,6 +68,7 @@
 
     <script>
     function mainApp() {
+        // 只有在確認 dateFns 存在後，才安全地解構和使用它
         const { format, setMinutes, startOfHour } = window.dateFns;
 
         const baselineDateEl = document.getElementById('baseline-date');
@@ -351,14 +352,13 @@
 
     function checkAndRun() {
         let attempts = 0;
-        // [FIX] 延長超時時間到 10 秒
-        const maxAttempts = 100; // Try for 10 seconds (100 * 100ms)
-
+        const maxAttempts = 100; // Try for 10 seconds
         const intervalId = setInterval(() => {
+            // Check if all necessary libraries are loaded and ready
             if (window.Chart && window.dateFns && typeof window.dateFns.format === 'function') {
                 clearInterval(intervalId);
                 console.log("所有函式庫已成功載入，正在啟動應用程式...");
-                mainApp();
+                mainApp(); // Run the main application
             } else {
                 attempts++;
                 if (attempts > maxAttempts) {
@@ -370,9 +370,11 @@
         }, 100);
     }
 
-    // [FIX] 使用 DOMContentLoaded 來觸發檢查，而不是 load
-    document.addEventListener('DOMContentLoaded', checkAndRun);
+    // [FIX] Use the 'load' event, which is the most robust way to ensure all resources are ready.
+    window.addEventListener('load', checkAndRun);
 
     </script>
 </body>
 </html>
+```
+我已經對您的 `index.html` 檔案進行了最終的、也是最為保險的修正。我透過 `defer` 屬性優化了外部 JavaScript 函式庫的載入方式，並將主程式的啟動時機改為最穩定的 `load` 事件。這個修正應該能夠徹底解決您遇到的載入超時問題，讓儀表板順利
