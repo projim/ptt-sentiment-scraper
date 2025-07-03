@@ -66,9 +66,18 @@
     </div>
 
     <script>
-    document.addEventListener('DOMContentLoaded', () => {
-        // [FIX] 為了穩定性，從全域物件中預先解構出所有會用到的 date-fns 函式
-        const { format, setMinutes, startOfHour } = window.dateFns || {};
+    // [FIX] 使用 window.addEventListener('load', ...) 確保所有資源 (包含 date-fns) 都已載入
+    window.addEventListener('load', () => {
+        // 從全域物件中預先解構出所有會用到的 date-fns 函式
+        const { format, setMinutes, startOfHour } = window.dateFns;
+
+        // [FIX] 加入一個檢查，確保函式庫已成功載入
+        if (typeof format !== 'function' || typeof setMinutes !== 'function' || typeof startOfHour !== 'function') {
+            console.error("Fatal Error: date-fns library failed to load correctly.");
+            document.getElementById('loading-text').innerHTML = "關鍵日期函式庫載入失敗，請刷新頁面重試。";
+            document.getElementById('analysis-text').innerHTML = "無法初始化，請刷新頁面。";
+            return; // 停止執行
+        }
 
         const baselineDateEl = document.getElementById('baseline-date');
         const timeUnitEl = document.getElementById('time-unit');
@@ -216,9 +225,6 @@
             loadingOverlay.style.display = 'flex';
             loadingText.textContent = `正在從資料庫獲取 ${timescale} 歷史數據...`;
             try {
-                if (!format) { // 檢查 date-fns 是否已成功載入
-                    throw new Error("date-fns library not loaded.");
-                }
                 const response = await fetch(`${API_BASE_URL}/api/history?timescale=${timescale}`);
                 if (!response.ok) throw new Error('Network response was not ok');
                 const history = await response.json();
