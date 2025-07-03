@@ -1,22 +1,96 @@
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
-    <!-- [FIX] 重新加入遺漏的 date-fns 日期處理函式庫 -->
-<script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/cdn.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
-<style>
-@@ -81,13 +82,78 @@ <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
-let baselinePni = 0;
-let ws;
-let isConnected = false;
-        let realtimePniHistory = []; // 只儲存即時數據
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PTT 八卦版輿情分析平台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/cdn.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', 'Noto Sans TC', sans-serif; }
+        .blinking-dot { animation: blinker 1.5s linear infinite; }
+        @keyframes blinker { 50% { opacity: 0; } }
+        input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); cursor: pointer; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-2 sm:p-4">
+
+    <div class="w-full max-w-5xl bg-gray-800 rounded-2xl shadow-2xl p-4 sm:p-6 md:p-8">
+        
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4">
+            <div>
+                <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-white flex items-center">
+                    <span id="connection-dot" class="blinking-dot text-yellow-500 text-4xl mr-2">●</span>
+                    <span>PTT 八卦版輿情分析平台</span>
+                </h1>
+                <p class="text-xs sm:text-sm text-gray-400 mt-1">
+                    <span id="connection-status">正在連接後端伺服器...</span> | 
+                    上次更新: <span id="last-updated">--:--:--</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div class="bg-gray-900 p-3 rounded-lg">
+                <label for="baseline-date" class="text-sm font-medium text-gray-400">設定基準日</label>
+                <input type="date" id="baseline-date" class="w-full bg-gray-700 text-white rounded-md p-2 mt-1 border-0 focus:ring-2 focus:ring-indigo-500">
+            </div>
+            <div class="bg-gray-900 p-3 rounded-lg">
+                <label for="time-unit" class="text-sm font-medium text-gray-400">選擇時間維度</label>
+                <select id="time-unit" class="w-full bg-gray-700 text-white rounded-md p-2 mt-1 border-0 focus:ring-2 focus:ring-indigo-500">
+                    <option value="realtime">即時 (最近一小時)</option>
+                    <option value="30m">每 30 分鐘 (過去一天)</option>
+                    <option value="1h">每小時 (過去三天)</option>
+                </select>
+            </div>
+            <div class="bg-gray-900 p-3 rounded-lg">
+                 <label class="text-sm font-medium text-gray-400">基準日負面指數 (PNI)</label>
+                 <p id="baseline-value" class="text-2xl font-bold text-indigo-400 mt-1">-- %</p>
+            </div>
+        </div>
+
+        <div class="bg-gray-900 p-4 rounded-xl relative h-64 md:h-96">
+            <canvas id="sentimentChart"></canvas>
+            <div id="loading-overlay" class="absolute inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center rounded-xl z-10">
+                <p id="loading-text" class="text-white text-lg text-center p-4 animate-pulse">正在初始化...</p>
+            </div>
+        </div>
+
+        <div class="mt-6 bg-gray-900 p-6 rounded-xl">
+            <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
+            <p id="analysis-text" class="text-gray-300 leading-relaxed">請設定基準日以開始分析。</p>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        // [FIX] 為了穩定性，從全域物件中預先解構出所有會用到的 date-fns 函式
+        const { format, setMinutes, startOfHour } = window.dateFns || {};
+
+        const baselineDateEl = document.getElementById('baseline-date');
+        const timeUnitEl = document.getElementById('time-unit');
+        const baselineValueEl = document.getElementById('baseline-value');
+        const analysisText = document.getElementById('analysis-text');
+        const lastUpdatedEl = document.getElementById('last-updated');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const loadingText = document.getElementById('loading-text');
+        const connectionDot = document.getElementById('connection-dot');
+        const connectionStatus = document.getElementById('connection-status');
+        const ctx = document.getElementById('sentimentChart').getContext('2d');
+        
+        let sentimentChart;
+        let baselinePni = 0;
+        let ws;
+        let isConnected = false;
         let realtimePniHistory = [];
 
-const serviceName = "ptt-gossiping-live"; // 請換成您在 Render 上設定的服務名稱
-const API_BASE_URL = `https://${serviceName}.onrender.com`;
-const WEBSOCKET_URL = `wss://${serviceName}.onrender.com/ws`;
-
-        const chartConfig = { /* ... (Chart.js configuration remains the same) ... */ };
+        const serviceName = "ptt-gossiping-live"; // 請換成您在 Render 上設定的服務名稱
+        const API_BASE_URL = `https://${serviceName}.onrender.com`;
+        const WEBSOCKET_URL = `wss://${serviceName}.onrender.com/ws`;
+        
         const chartConfig = {
             type: 'line',
             data: {
@@ -84,14 +158,30 @@ const WEBSOCKET_URL = `wss://${serviceName}.onrender.com/ws`;
             }
         };
 
-function connectWebSocket() {
-ws = new WebSocket(WEBSOCKET_URL);
-@@ -113,8 +179,26 @@ <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
-lastUpdatedEl.textContent = new Date().toLocaleTimeString('zh-TW');
-}
-};
-            ws.onclose = () => { /* ... (same as previous version) ... */ };
-            ws.onerror = (error) => { /* ... (same as previous version) ... */ };
+        function connectWebSocket() {
+            ws = new WebSocket(WEBSOCKET_URL);
+
+            ws.onopen = () => {
+                isConnected = true;
+                connectionStatus.textContent = "已連接";
+                connectionDot.classList.remove('text-yellow-500', 'text-red-500');
+                connectionDot.classList.add('text-green-500');
+                updateChart(); 
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'pni_update') {
+                    const newPoint = { timestamp: new Date(data.timestamp * 1000), pni: data.pni };
+                    realtimePniHistory.push(newPoint);
+                    if (realtimePniHistory.length > 60) realtimePniHistory.shift();
+
+                    if (timeUnitEl.value === 'realtime') {
+                        updateActiveChart();
+                    }
+                    lastUpdatedEl.textContent = new Date().toLocaleTimeString('zh-TW');
+                }
+            };
             
             ws.onclose = () => {
                 console.log("WebSocket 連接已斷開。");
@@ -112,17 +202,99 @@ lastUpdatedEl.textContent = new Date().toLocaleTimeString('zh-TW');
             ws.onerror = (error) => {
                 console.error("WebSocket 發生錯誤:", error);
             };
-}
+        }
 
-function updateActiveChart() {
-@@ -205,14 +289,61 @@ <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
-}
-}
+        function updateActiveChart() {
+            if (!sentimentChart) return;
+            const dataForChart = realtimePniHistory.map(p => ({ x: p.timestamp, y: p.pni - baselinePni }));
+            sentimentChart.data.datasets[0].data = dataForChart;
+            sentimentChart.update('none');
+            generateAnalysis(dataForChart, 'realtime');
+        }
 
-        // ... (The rest of the functions like generateBaselinePni, event listeners, and initialize remain the same, but with minor adjustments for the new logic) ...
-        function generateAnalysis(data, mode) { /* ... */ }
-        function generateBaselinePni(dateString) { /* ... */ }
-        baselineDateEl.addEventListener('change', () => { /* ... */ });
+        async function fetchAndProcessHistory(timescale) {
+            loadingOverlay.style.display = 'flex';
+            loadingText.textContent = `正在從資料庫獲取 ${timescale} 歷史數據...`;
+            try {
+                if (!format) { // 檢查 date-fns 是否已成功載入
+                    throw new Error("date-fns library not loaded.");
+                }
+                const response = await fetch(`${API_BASE_URL}/api/history?timescale=${timescale}`);
+                if (!response.ok) throw new Error('Network response was not ok');
+                const history = await response.json();
+                
+                const dataForChart = aggregateData(history, timescale);
+                
+                if (sentimentChart) sentimentChart.destroy();
+                const newConfig = initializeChartConfig(timescale);
+                sentimentChart = new Chart(ctx, newConfig);
+                
+                sentimentChart.data.datasets[0].data = dataForChart;
+                sentimentChart.update();
+                generateAnalysis(dataForChart, timescale);
+
+            } catch (error) {
+                console.error('獲取歷史數據失敗:', error);
+                analysisText.innerHTML = "無法從資料庫獲取歷史數據。請稍後再試。錯誤：" + error.message;
+            } finally {
+                loadingOverlay.style.display = 'none';
+            }
+        }
+        
+        function aggregateData(history, timescale) {
+            if (!history || history.length === 0) return [];
+
+            const getBucketKey = (ts, scale) => {
+                const date = new Date(ts);
+                if (scale === '30m') {
+                    const minutes = Math.floor(date.getMinutes() / 30) * 30;
+                    return format(setMinutes(startOfHour(date), minutes), "yyyy-MM-dd'T'HH:mm:ss");
+                }
+                if (scale === '1h') {
+                    return format(startOfHour(date), "yyyy-MM-dd'T'HH:mm:ss");
+                }
+                return '';
+            };
+
+            const buckets = history.reduce((acc, record) => {
+                const key = getBucketKey(record.timestamp, timescale);
+                if (!acc[key]) acc[key] = [];
+                acc[key].push(record.pni);
+                return acc;
+            }, {});
+
+            return Object.entries(buckets).map(([key, pnis]) => {
+                const avgPni = pnis.reduce((a, b) => a + b, 0) / pnis.length;
+                return { x: new Date(key), y: avgPni - baselinePni };
+            }).sort((a,b) => a.x - b.x);
+        }
+
+        function initializeChartConfig(mode) {
+            const newConfig = JSON.parse(JSON.stringify(chartConfig));
+            const timeFormats = {
+                realtime: { unit: 'minute', tooltipFormat: 'HH:mm:ss', displayFormats: { minute: 'HH:mm' } },
+                '30m': { unit: 'minute', tooltipFormat: 'HH:mm', displayFormats: { minute: 'HH:mm' } },
+                '1h': { unit: 'hour', tooltipFormat: 'yyyy/MM/dd HH:mm', displayFormats: { hour: 'HH:mm' } }
+            };
+            newConfig.options.scales.x.time = timeFormats[mode];
+            return newConfig;
+        }
+
+        function updateChart() {
+            const mode = timeUnitEl.value;
+            if (mode === 'realtime') {
+                loadingOverlay.style.display = 'flex';
+                loadingText.textContent = "等待即時數據...";
+                if (sentimentChart) sentimentChart.destroy();
+                const newConfig = initializeChartConfig(mode);
+                sentimentChart = new Chart(ctx, newConfig);
+                updateActiveChart();
+                loadingOverlay.style.display = 'none';
+            } else {
+                fetchAndProcessHistory(mode);
+            }
+        }
+        
         function generateAnalysis(data, mode) {
             if (!data || data.length === 0) {
                 if(!isConnected) {
@@ -139,9 +311,9 @@ function updateActiveChart() {
             if (mode === 'realtime') {
                 analysis += `最近一小時的即時數據顯示，情緒高峰趨勢為 **${peakPoint.y > 0 ? '+' : ''}${peakPoint.y.toFixed(1)}%**。`;
             } else if (mode === '30m') {
-                analysis += `過去24小時的彙總數據顯示，情緒高峰出現在 **${dateFns.format(peakPoint.x, 'HH:mm')}** 左右，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
-            } else {
-                analysis += `過去3天的彙總數據顯示，情緒高峰出現在 **${dateFns.format(peakPoint.x, 'MM/dd HH:00')}**，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
+                analysis += `過去24小時的彙總數據顯示，情緒高峰出現在 **${format(peakPoint.x, 'HH:mm')}** 左右，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
+            } else { // '1h'
+                analysis += `過去3天的彙總數據顯示，情緒高峰出現在 **${format(peakPoint.x, 'MM/dd HH:00')}**，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
             }
             analysis += ` 目前最新的趨勢指數為 **${lastPoint.y > 0 ? '+' : ''}${lastPoint.y.toFixed(1)}%**。`;
             analysisText.innerHTML = analysis;
@@ -164,9 +336,7 @@ function updateActiveChart() {
             baselineValueEl.textContent = `${baselinePni.toFixed(1)} %`;
             updateChart();
         });
-timeUnitEl.addEventListener('change', updateChart);
-        function initialize() { /* ... */ }
-        initialize();
+        timeUnitEl.addEventListener('change', updateChart);
 
         function initialize() {
             const today = new Date();
@@ -180,7 +350,7 @@ timeUnitEl.addEventListener('change', updateChart);
         }
 
         initialize();
-</script>
+    });
+    </script>
 </body>
-</ht
 </html>
