@@ -5,143 +5,125 @@ from bs4 import BeautifulSoup
 import json
 import time
 import os
-import threading
-from flask import Flask
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-# --- Flask App for Health Checks (to keep Web Service alive) ---
-# 用於接收外部監控服務的請求，防止服務休眠
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    """A simple HTTP endpoint to respond to pinger services."""
-    return "PTT Scraper WebSocket server is alive and running."
-
-def run_flask_app():
-    """Runs the Flask app in a separate thread."""
-    # Render 會提供 PORT 環境變數給 Web Service
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
+# --- FastAPI App ---
+# FastAPI 會同時處理 HTTP 和 WebSocket 請求
+app = FastAPI()
 
 # --- PTT Scraper ---
 PTT_URL = "https://www.ptt.cc"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
-
-# PTT 八卦版需要 cookies 來通過 "我已滿18歲" 的檢查
 cookies = {"over18": "1"}
 
-# 在一個時間窗口內收集數據來計算 PNI
-push_count = 0
-boo_count = 0
-last_calculation_time = time.time()
+# 這些變數現在放在一個類別中，方便管理
+class PNI_Calculator:
+    def __init__(self):
+        self.push_count = 0
+        self.boo_count = 0
+        self.last_calculation_time = time.time()
 
-def get_pni_from_gossiping():
-    """
-    爬取 PTT 八卦版最新頁面，計算推文和噓文數。
-    """
-    global push_count, boo_count, last_calculation_time
-
-    try:
-        response = requests.get(GOSSIPING_BOARD_URL, cookies=cookies, timeout=5)
-        response.raise_for_status() # 如果請求失敗，會拋出例外
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        articles = soup.find_all("div", class_="r-ent")
-
-        # 這個邏輯會累積多次爬取的推噓文數
-        for article in articles:
-            push_tag = article.find("div", class_="nrec")
-            if push_tag and push_tag.span:
-                push_str = push_tag.span.string
-                if push_str:
-                    if push_str.startswith('X'): # 被噓到X的文章
-                        try:
-                            boo_count += int(push_str[1:]) * 10
-                        except (ValueError, TypeError):
-                            boo_count += 100 # 如果轉換失敗，當作X10
-                    elif push_str.isdigit():
-                        push_count += int(push_str)
-                    elif push_str == '爆':
-                        push_count += 100
-        
-        # 每分鐘計算一次 PNI 並廣播
-        current_time = time.time()
-        if current_time - last_calculation_time > 60:
-            pni = (boo_count / (push_count + boo_count)) * 100 if (push_count + boo_count) > 0 else 0
+    def get_pni(self):
+        """爬取 PTT 並計算 PNI"""
+        try:
+            response = requests.get(GOSSIPING_BOARD_URL, cookies=cookies, timeout=5)
+            response.raise_for_status()
             
-            # 重置計數器，為下一個時間窗口做準備
-            push_count = 0
-            boo_count = 0
-            last_calculation_time = current_time
+            soup = BeautifulSoup(response.text, "html.parser")
+            articles = soup.find_all("div", class_="r-ent")
+
+            for article in articles:
+                push_tag = article.find("div", class_="nrec")
+                if push_tag and push_tag.span:
+                    push_str = push_tag.span.string
+                    if push_str:
+                        if push_str.startswith('X'):
+                            try:
+                                self.boo_count += int(push_str[1:]) * 10
+                            except (ValueError, TypeError):
+                                self.boo_count += 100
+                        elif push_str.isdigit():
+                            self.push_count += int(push_str)
+                        elif push_str == '爆':
+                            self.push_count += 100
             
-            print(f"計算出的 PNI: {pni:.2f}%")
-            return pni
+            current_time = time.time()
+            if current_time - self.last_calculation_time > 60:
+                pni = (self.boo_count / (self.push_count + self.boo_count)) * 100 if (self.push_count + self.boo_count) > 0 else 0
+                
+                self.push_count = 0
+                self.boo_count = 0
+                self.last_calculation_time = current_time
+                
+                print(f"計算出的 PNI: {pni:.2f}%")
+                return pni
+                
+        except Exception as e:
+            print(f"爬取或計算 PNI 時發生錯誤: {e}")
             
-    except requests.RequestException as e:
-        print(f"爬取 PTT 時發生錯誤: {e}")
-    except Exception as e:
-        print(f"處理 PTT 數據時發生錯誤: {e}")
-        
-    return None # 如果還沒到計算時間，返回 None
+        return None
 
+# 建立一個 PNI 計算器的實例
+pni_calculator = PNI_Calculator()
 
-# --- WebSocket Server ---
-connected_clients = set()
+# --- WebSocket Connection Manager ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
 
-async def register(websocket):
-    """註冊新的客戶端連接"""
-    connected_clients.add(websocket)
-    print(f"新的客戶端連接: {websocket.remote_address}")
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"新的客戶端連接: {websocket.client.host}")
 
-async def unregister(websocket):
-    """移除斷開的客戶端連接"""
-    connected_clients.remove(websocket)
-    print(f"客戶端斷開連接: {websocket.remote_address}")
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        print(f"客戶端斷開連接: {websocket.client.host}")
 
-async def broadcast_pni():
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+manager = ConnectionManager()
+
+# --- Background Task for Broadcasting ---
+async def broadcast_pni_periodically():
     """定期爬取數據並廣播給所有客戶端"""
     while True:
-        pni = get_pni_from_gossiping()
+        pni = pni_calculator.get_pni()
         
-        if pni is not None and connected_clients:
+        if pni is not None:
             message = json.dumps({
                 "type": "pni_update",
                 "timestamp": time.time(),
                 "pni": pni
             })
-            # 使用 asyncio.gather 來並行發送消息給所有客戶端
-            await asyncio.gather(*[client.send(message) for client in connected_clients])
+            await manager.broadcast(message)
             print(f"已廣播 PNI 數據: {pni:.2f}%")
         
-        # 每 10 秒爬取一次
-        await asyncio.sleep(10)
+        await asyncio.sleep(10) # 每 10 秒執行一次
 
-async def handler(websocket, path):
-    """處理 WebSocket 連接的主函數"""
-    await register(websocket)
+# --- API Endpoints ---
+@app.on_event("startup")
+async def startup_event():
+    """在應用啟動時，開始背景廣播任務"""
+    asyncio.create_task(broadcast_pni_periodically())
+
+@app.get("/")
+def read_root():
+    """HTTP 端點，用於回應 Pinger 服務，防止休眠"""
+    return {"status": "PTT Scraper WebSocket server is alive"}
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket 端點，處理客戶端的連接"""
+    await manager.connect(websocket)
     try:
-        # 保持連接開啟，直到客戶端斷開
-        await websocket.wait_closed()
-    finally:
-        await unregister(websocket)
+        while True:
+            # 保持連接開啟，等待客戶端斷開
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
-async def main_websocket():
-    """WebSocket 伺服器主邏輯"""
-    # WebSocket 伺服器端口。Render 會自動處理端口映射。
-    websocket_port = 10000 
-    async with websockets.serve(handler, "0.0.0.0", websocket_port):
-        print(f"WebSocket 伺服器已啟動於 ws://localhost:{websocket_port}")
-        await broadcast_pni()
-
-if __name__ == "__main__":
-    # 在一個獨立的線程中啟動 Flask HTTP 伺服器
-    flask_thread = threading.Thread(target=run_flask_app, daemon=True)
-    flask_thread.start()
-    print("HTTP 伺服器已啟動於一個獨立線程中。")
-
-    # 在主線程中啟動 WebSocket 伺服器
-    try:
-        asyncio.run(main_websocket())
-    except KeyboardInterrupt:
-        print("伺服器已手動關閉。")
+# --- To run this app locally, use: uvicorn ptt_backend:app --reload ---
+# On Render, the start command will be: uvicorn ptt_backend:app --host 0.0.0.0 --port 10000
