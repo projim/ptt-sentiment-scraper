@@ -27,7 +27,6 @@ app.add_middleware(
 )
 
 # --- Database Setup ---
-# [DEBUG] 從環境變數讀取資料庫 URL
 DATABASE_URL = os.environ.get('DATABASE_URL')
 engine = None
 SessionLocal = None
@@ -46,16 +45,14 @@ def initialize_database():
         print("[重大錯誤] 找不到環境變數 DATABASE_URL。請在 Render 上設定。")
         return False
     
-    # Render 的 URL 是 postgres://，但 SQLAlchemy 需要 postgresql://
     db_url_for_sqlalchemy = DATABASE_URL
     if DATABASE_URL.startswith("postgres://"):
         db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     
-    print(f"[偵錯] 正在嘗試使用以下 URL 連接資料庫: {db_url_for_sqlalchemy[:20]}...") # 只顯示部分 URL 以策安全
+    print(f"[偵錯] 正在嘗試使用以下 URL 連接資料庫: {db_url_for_sqlalchemy[:20]}...")
 
     try:
         engine = create_engine(db_url_for_sqlalchemy)
-        # 嘗試建立連線
         with engine.connect() as connection:
             print("[成功] 資料庫連接成功！")
         
@@ -70,20 +67,66 @@ def initialize_database():
         return False
 
 # --- PTT Scraper (Async Deep Scrape Logic) ---
-# ... (爬蟲邏輯與之前版本相同，此處省略以保持簡潔) ...
+PTT_URL = "https://www.ptt.cc"
+GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
+cookies = {"over18": "1"}
+headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+
 async def deep_scrape_pni():
-    # ...
-    return 15.0 # 範例返回值
+    """非同步深度分析：進入每篇文章內頁，精準計算 PNI。"""
+    try:
+        async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=20) as client:
+            response = await client.get(GOSSIPING_BOARD_URL)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            articles = soup.find_all("div", class_="r-ent")
+            article_urls = [PTT_URL + a.find('a')['href'] for a in articles if a.find('a')]
+
+            total_push = 0
+            total_boo = 0
+            
+            for url in article_urls:
+                try:
+                    await asyncio.sleep(0.5)
+                    article_res = await client.get(url)
+                    article_soup = BeautifulSoup(article_res.text, 'html.parser')
+                    pushes = article_soup.find_all('span', class_='push-tag', string=lambda text: '推' in text)
+                    boos = article_soup.find_all('span', class_='push-tag', string=lambda text: '噓' in text)
+                    total_push += len(pushes)
+                    total_boo += len(boos)
+                except Exception as e:
+                    print(f"[警告] 爬取內頁 {url} 失敗: {e}")
+
+            total_votes = total_push + total_boo
+            pni = (total_boo / total_votes) * 100 if total_votes > 0 else 0
+            
+            print(f"--- 深度分析完成 ---")
+            print(f"總推文: {total_push}, 總噓文: {total_boo}, PNI: {pni:.2f}%")
+            print(f"--------------------")
+            
+            return pni
+    except Exception as e:
+        print(f"[錯誤] 爬取列表頁失敗: {e}")
+        return None
 
 # --- WebSocket & Background Task ---
-# ... (WebSocket 邏輯與之前版本相同，此處省略) ...
 class ConnectionManager:
-    # ...
-    pass
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"新的客戶端連接: {websocket.client.host}")
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        print(f"客戶端斷開連接: {websocket.client.host}")
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
 manager = ConnectionManager()
 
 async def scrape_and_save_periodically():
-    # 等待資料庫成功初始化
     while SessionLocal is None:
         print("等待資料庫初始化...")
         await asyncio.sleep(5)
@@ -93,8 +136,20 @@ async def scrape_and_save_periodically():
         
         if pni is not None:
             db = SessionLocal()
-            # ... (寫入資料庫邏輯與之前版本相同) ...
-            db.close()
+            try:
+                new_record = PniRecord(pni=pni)
+                db.add(new_record)
+                db.commit()
+                print(f"PNI {pni:.2f}% 已成功存入資料庫。")
+            except SQLAlchemyError as e:
+                print(f"[錯誤] 寫入資料庫失敗: {e}")
+                db.rollback()
+            finally:
+                db.close()
+
+            message = json.dumps({"type": "pni_update", "timestamp": time.time(), "pni": pni})
+            await manager.broadcast(message)
+            print(f"已廣播最新 PNI 數據。")
         
         await asyncio.sleep(180)
 
@@ -119,12 +174,28 @@ def get_history(timescale: str = "30m"):
         return {"error": "Database not connected"}
     db = SessionLocal()
     try:
-        # ... (查詢邏輯與之前版本相同) ...
-        return []
+        if timescale == "30m":
+            start_time = datetime.utcnow() - timedelta(hours=24)
+        elif timescale == "1h":
+            start_time = datetime.utcnow() - timedelta(days=3)
+        else:
+            start_time = datetime.utcnow() - timedelta(days=30)
+        records = db.query(PniRecord).filter(PniRecord.timestamp >= start_time).order_by(desc(PniRecord.timestamp)).all()
+        return [{"timestamp": r.timestamp.isoformat(), "pni": r.pni} for r in records]
+    except Exception as e:
+        print(f"[錯誤] 查詢歷史數據時發生錯誤: {e}")
+        return {"error": "Could not retrieve history"}
     finally:
         db.close()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    # ... (WebSocket 端點邏輯與之前版本相同) ...
-    pass
+    """[FIX] 還原完整的 WebSocket 端點邏輯"""
+    await manager.connect(websocket)
+    try:
+        while True:
+            # 保持連線開啟，等待客戶端發送訊息 (雖然我們目前不會處理)
+            # 或等待客戶端主動斷線
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
