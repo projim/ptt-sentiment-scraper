@@ -1,4 +1,5 @@
+fastapi
+uvicorn[standard]
 websockets
 requests
 beautifulsoup4
-Flask
