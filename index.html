@@ -1,68 +1,186 @@
-<!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PTT 八卦版輿情分析平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
-    <style>
-        body { font-family: 'Inter', 'Noto Sans TC', sans-serif; }
-        .blinking-dot { animation: blinker 1.5s linear infinite; }
-        @keyframes blinker { 50% { opacity: 0; } }
-        input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); cursor: pointer; }
-    </style>
-</head>
-<body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-2 sm:p-4">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <!-- [FIX] 重新加入遺漏的 date-fns 日期處理函式庫 -->
+<script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/cdn.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+@@ -81,13 +82,78 @@ <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
+let baselinePni = 0;
+let ws;
+let isConnected = false;
+        let realtimePniHistory = []; // 只儲存即時數據
+        let realtimePniHistory = [];
 
-    <div class="w-full max-w-5xl bg-gray-800 rounded-2xl shadow-2xl p-4 sm:p-6 md:p-8">
-        
-        <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4">
-            <div>
-                <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-white flex items-center">
-                    <span id="connection-dot" class="blinking-dot text-yellow-500 text-4xl mr-2">●</span>
-                    <span>PTT 八卦版輿情分析平台</span>
-                </h1>
-                <p class="text-xs sm:text-sm text-gray-400 mt-1">
-                    <span id="connection-status">正在初始化...</span> | 
-                    上次更新: <span id="last-updated">--:--:--</span>
-                </p>
-            </div>
-        </div>
+const serviceName = "ptt-gossiping-live"; // 請換成您在 Render 上設定的服務名稱
+const API_BASE_URL = `https://${serviceName}.onrender.com`;
+const WEBSOCKET_URL = `wss://${serviceName}.onrender.com/ws`;
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div class="bg-gray-900 p-3 rounded-lg">
-                <label for="baseline-date" class="text-sm font-medium text-gray-400">設定基準日</label>
-                <input type="date" id="baseline-date" class="w-full bg-gray-700 text-white rounded-md p-2 mt-1 border-0 focus:ring-2 focus:ring-indigo-500">
-            </div>
-            <div class="bg-gray-900 p-3 rounded-lg">
-                <label for="time-unit" class="text-sm font-medium text-gray-400">選擇時間維度</label>
-                <select id="time-unit" class="w-full bg-gray-700 text-white rounded-md p-2 mt-1 border-0 focus:ring-2 focus:ring-indigo-500">
-                    <option value="realtime">即時 (最近一小時)</option>
-                    <option value="30m">每 30 分鐘 (過去一天)</option>
-                    <option value="1h">每小時 (過去三天)</option>
-                </select>
-            </div>
-            <div class="bg-gray-900 p-3 rounded-lg">
-                 <label class="text-sm font-medium text-gray-400">基準日負面指數 (PNI)</label>
-                 <p id="baseline-value" class="text-2xl font-bold text-indigo-400 mt-1">-- %</p>
-            </div>
-        </div>
+        const chartConfig = { /* ... (Chart.js configuration remains the same) ... */ };
+        const chartConfig = {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: '負面情緒趨勢',
+                    data: [],
+                    borderColor: 'rgba(255, 255, 255, 0.5)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.4,
+                    fill: true,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {},
+                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                        ticks: { color: 'rgba(255, 255, 255, 0.7)' }
+                    },
+                    y: {
+                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                        ticks: {
+                            color: 'rgba(255, 255, 255, 0.7)',
+                            callback: value => value.toFixed(0) + '%'
+                        },
+                        title: {
+                            display: true,
+                            text: '趨勢 (與基準比較)',
+                            color: 'rgba(255, 255, 255, 0.9)'
+                        }
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: context => `趨勢: ${context.parsed.y.toFixed(1)}%`
+                        }
+                    },
+                    annotation: {
+                        annotations: {
+                            baseline: {
+                                type: 'line',
+                                yMin: 0,
+                                yMax: 0,
+                                borderColor: 'rgba(255, 255, 0, 0.7)',
+                                borderWidth: 2,
+                                borderDash: [6, 6],
+                                label: {
+                                    content: '基準線',
+                                    enabled: true,
+                                    position: 'end',
+                                    backgroundColor: 'rgba(255, 255, 0, 0.7)',
+                                    color: 'black',
+                                    font: { weight: 'bold' }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
 
-        <div class="bg-gray-900 p-4 rounded-xl relative h-64 md:h-96">
-            <canvas id="sentimentChart"></canvas>
-            <div id="loading-overlay" class="absolute inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center rounded-xl z-10">
-                <p id="loading-text" class="text-white text-lg text-center p-4 animate-pulse">等待應用程式啟動...</p>
-            </div>
-        </div>
+function connectWebSocket() {
+ws = new WebSocket(WEBSOCKET_URL);
+@@ -113,8 +179,26 @@ <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
+lastUpdatedEl.textContent = new Date().toLocaleTimeString('zh-TW');
+}
+};
+            ws.onclose = () => { /* ... (same as previous version) ... */ };
+            ws.onerror = (error) => { /* ... (same as previous version) ... */ };
+            
+            ws.onclose = () => {
+                console.log("WebSocket 連接已斷開。");
+                connectionDot.classList.remove('text-green-500', 'text-yellow-500');
+                connectionDot.classList.add('text-red-500');
+                if (isConnected) {
+                    isConnected = false;
+                    connectionStatus.textContent = "已斷線，5秒後嘗試重新連接...";
+                    setTimeout(connectWebSocket, 5000);
+                } else {
+                    const errorMsg = `連線失敗。<br><strong class="text-yellow-400">請確認Python後端伺服器已部署並正確運行。</strong>`;
+                    connectionStatus.innerHTML = errorMsg;
+                    loadingText.innerHTML = errorMsg;
+                    analysisText.innerHTML = "無法連接到後端伺服器。請部署 Python 爬蟲程式，然後刷新此頁面。";
+                }
+            };
 
-        <div class="mt-6 bg-gray-900 p-6 rounded-xl">
-            <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
-            <p id="analysis-text" class="text-gray-300 leading-relaxed">請設定基準日以開始分析。</p>
-        </div>
-    </div>
+            ws.onerror = (error) => {
+                console.error("WebSocket 發生錯誤:", error);
+            };
+}
 
-    <!-- [FINAL FIX] 將所有外部函式庫直接內嵌到 HTML 中 -->
-    <script>
-        // Chart.js v3.9.1 (minified)
-        !function(t,e){"object"==typeof exports&&"undefined"!=typeof module?module.exports=e():"function"==typeof define&&define.amd?define(e):(t="undefined"!=typeof globalThis?globalThis:t||self).Chart=e()}(this,function(){"use strict";const t={0:"rgb(54, 162, 235)",1:"rgb(255, 99, 132)",2:"rgb(255, 159, 64)",3:"rgb(255, 205, 86)",4:"rgb(75, 192, 192)",5:"rgb(153, 102, 255)",6:"rgb(201, 203, 207)"},e=["#5470c6","#91cc75","#fac858","#ee6666","#73c0de","#3ba272","#fc8452","#9a60b4","#ea7ccc"];function i(t){return t+"_legend"}function s(t,e,i){return i||t.split(".").reduce(((t,e)=>t&&t[e]),e)}function n(t,e){return"string"==typeof t?Object.assign({},e,{[i(e.id)]:t}):Object.assign({},e,t)}function o(t,e){const i=t.createEvent("Event");return i.initEvent(e,!0,!0),i}function a(t,e){const i=o(t,"beforeInit");e.notify(i)&&(e.init(i),e.notify(o(t,"afterInit")))}function r(t,e){const i=o(t,"beforeUpdate");e.notify(i)&&(e.update(i),e.notify(o(t,"afterUpdate")))}function l(t,e,i,s){const n=i.options[s],o=n.pos,a=n.padding;if(n.display){const r=e.create("div");r.style.display="flex",r.style.flexDirection="column",r.style.alignItems="left"===o?"flex-start":"right"===o?"flex-end":"center",r.style.padding=a+"px",i.leg
+function updateActiveChart() {
+@@ -205,14 +289,61 @@ <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
+}
+}
+
+        // ... (The rest of the functions like generateBaselinePni, event listeners, and initialize remain the same, but with minor adjustments for the new logic) ...
+        function generateAnalysis(data, mode) { /* ... */ }
+        function generateBaselinePni(dateString) { /* ... */ }
+        baselineDateEl.addEventListener('change', () => { /* ... */ });
+        function generateAnalysis(data, mode) {
+            if (!data || data.length === 0) {
+                if(!isConnected) {
+                     analysisText.innerHTML = "無法連接到後端伺服器。請部署 Python 爬蟲程式，然後刷新此頁面。";
+                } else {
+                     analysisText.innerHTML = "正在等待從後端接收即時數據...";
+                }
+                return;
+            }
+            const lastPoint = data[data.length - 1];
+            const peakPoint = data.reduce((max, p) => p.y > max.y ? p : max, data[0]);
+            
+            let analysis = `與基準日 ${baselineDateEl.value} (PNI: ${baselinePni.toFixed(1)}%) 相比，`;
+            if (mode === 'realtime') {
+                analysis += `最近一小時的即時數據顯示，情緒高峰趨勢為 **${peakPoint.y > 0 ? '+' : ''}${peakPoint.y.toFixed(1)}%**。`;
+            } else if (mode === '30m') {
+                analysis += `過去24小時的彙總數據顯示，情緒高峰出現在 **${dateFns.format(peakPoint.x, 'HH:mm')}** 左右，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
+            } else {
+                analysis += `過去3天的彙總數據顯示，情緒高峰出現在 **${dateFns.format(peakPoint.x, 'MM/dd HH:00')}**，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
+            }
+            analysis += ` 目前最新的趨勢指數為 **${lastPoint.y > 0 ? '+' : ''}${lastPoint.y.toFixed(1)}%**。`;
+            analysisText.innerHTML = analysis;
+        }
+
+        function generateBaselinePni(dateString) {
+            let hash = 0;
+            if (!dateString) dateString = new Date().toISOString();
+            for (let i = 0; i < dateString.length; i++) {
+                const char = dateString.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash |= 0;
+            }
+            const pseudoRandom = Math.abs(hash / 2147483647);
+            return 15 + pseudoRandom * 15;
+        }
+
+        baselineDateEl.addEventListener('change', () => {
+            baselinePni = generateBaselinePni(baselineDateEl.value);
+            baselineValueEl.textContent = `${baselinePni.toFixed(1)} %`;
+            updateChart();
+        });
+timeUnitEl.addEventListener('change', updateChart);
+        function initialize() { /* ... */ }
+        initialize();
+
+        function initialize() {
+            const today = new Date();
+            const yesterday = new Date(today);
+            yesterday.setDate(today.getDate() - 1);
+            baselineDateEl.value = yesterday.toISOString().split('T')[0];
+            baselinePni = generateBaselinePni(baselineDateEl.value);
+            baselineValueEl.textContent = `${baselinePni.toFixed(1)} %`;
+            
+            connectWebSocket();
+        }
+
+        initialize();
+</script>
+</body>
+</ht
+</html>
