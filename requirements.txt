@@ -5,3 +5,4 @@ requests
 beautifulsoup4
 SQLAlchemy
 psycopg2-binary
+httpx  # [UPGRADE] 新增非同步 HTTP 函式庫
