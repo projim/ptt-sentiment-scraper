@@ -5,131 +5,163 @@ import json
 import time
 import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.exc import SQLAlchemyError
+from datetime import datetime, timedelta
+
+# --- Database Setup (SQLAlchemy) ---
+# 從環境變數讀取 Render 提供的內部資料庫 URL
+DATABASE_URL = os.environ.get('DATABASE_URL')
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# 定義資料庫中的資料表結構
+class PniRecord(Base):
+    __tablename__ = "pni_records"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    pni = Column(Float, index=True)
+
+# 應用啟動時創建資料表
+Base.metadata.create_all(bind=engine)
 
 # --- FastAPI App ---
 app = FastAPI()
 
-# --- PTT Scraper ---
+# --- PTT Scraper (Deep Scrape Logic) ---
 PTT_URL = "https://www.ptt.cc"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
 cookies = {"over18": "1"}
+headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
-class PNI_Calculator:
-    def __init__(self):
-        self.push_article_count = 0
-        self.boo_article_count = 0
-        self.last_calculation_time = time.time()
+def deep_scrape_pni():
+    """
+    深度分析：進入每篇文章內頁，精準計算 PNI。
+    """
+    try:
+        # 1. 爬取列表頁，取得文章網址
+        response = requests.get(GOSSIPING_BOARD_URL, cookies=cookies, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        articles = soup.find_all("div", class_="r-ent")
+        article_urls = [PTT_URL + a.find('a')['href'] for a in articles if a.find('a')]
 
-    def get_pni(self):
-        """
-        爬取 PTT 並計算 PNI。
-        新邏輯：計算「噓文文章數」佔「總文章數」的比例，作為情緒指標。
-        """
-        try:
-            # 添加瀏覽器標頭，模擬真人訪問，避免被快取
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(GOSSIPING_BOARD_URL, cookies=cookies, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, "html.parser")
-            articles = soup.find_all("div", class_="r-ent")
-            
-            # 在這個爬取週期內，計算推文和噓文的文章數量
-            current_push_articles = 0
-            current_boo_articles = 0
-            
-            for article in articles:
-                push_tag = article.find("div", class_="nrec")
-                if push_tag and push_tag.span:
-                    push_str = push_tag.span.string
-                    if push_str:
-                        if push_str.startswith('X'): # 任何 'X' 開頭的都算噓文文章
-                            current_boo_articles += 1
-                        elif push_str.isdigit() or push_str == '爆': # 數字或 '爆' 都算推文文章
-                            current_push_articles += 1
-            
-            # 累積到全域計數器
-            self.push_article_count += current_push_articles
-            self.boo_article_count += current_boo_articles
-            
-            print(f"本次爬取: {current_push_articles} 推文文章, {current_boo_articles} 噓文文章。累積: {self.push_article_count} 推, {self.boo_article_count} 噓")
+        total_push = 0
+        total_boo = 0
+        
+        # 2. 逐一進入文章內頁
+        for url in article_urls:
+            try:
+                # 加入延遲，避免請求過於頻繁
+                time.sleep(0.5) 
+                
+                article_res = requests.get(url, cookies=cookies, headers=headers, timeout=10)
+                article_soup = BeautifulSoup(article_res.text, 'html.parser')
+                
+                # 3. 計算內頁的推噓文數
+                pushes = article_soup.find_all('span', class_='push-tag', string=lambda text: '推' in text)
+                boos = article_soup.find_all('span', class_='push-tag', string=lambda text: '噓' in text)
+                
+                total_push += len(pushes)
+                total_boo += len(boos)
+            except Exception as e:
+                print(f"[警告] 爬取內頁 {url} 失敗: {e}")
 
-            current_time = time.time()
-            if current_time - self.last_calculation_time > 60:
-                total_articles = self.push_article_count + self.boo_article_count
-                # PNI 現在是噓文文章的百分比
-                pni = (self.boo_article_count / total_articles) * 100 if total_articles > 0 else 0
-                
-                # 重置計數器
-                self.push_article_count = 0
-                self.boo_article_count = 0
-                self.last_calculation_time = current_time
-                
-                print(f"--- 每分鐘計算 ---")
-                print(f"總文章數: {total_articles}, PNI (噓文文章比例): {pni:.2f}%")
-                print(f"--------------------")
-                return pni
-                
-        except Exception as e:
-            print(f"[錯誤] 爬取或計算 PNI 時發生錯誤: {e}")
-            
+        # 4. 計算這一批文章的總 PNI
+        total_votes = total_push + total_boo
+        pni = (total_boo / total_votes) * 100 if total_votes > 0 else 0
+        
+        print(f"--- 深度分析完成 ---")
+        print(f"總推文: {total_push}, 總噓文: {total_boo}, PNI: {pni:.2f}%")
+        print(f"--------------------")
+        
+        return pni
+
+    except Exception as e:
+        print(f"[錯誤] 爬取列表頁失敗: {e}")
         return None
-
-pni_calculator = PNI_Calculator()
 
 # --- WebSocket Connection Manager ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
-
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-        print(f"新的客戶端連接: {websocket.client.host}")
-
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
-        print(f"客戶端斷開連接: {websocket.client.host}")
-
     async def broadcast(self, message: str):
         for connection in self.active_connections:
             await connection.send_text(message)
 
 manager = ConnectionManager()
 
-# --- Background Task for Broadcasting ---
-async def broadcast_pni_periodically():
-    """定期爬取數據並廣播給所有客戶端"""
+# --- Background Task for Scraping and Broadcasting ---
+async def scrape_and_save_periodically():
     while True:
-        pni = pni_calculator.get_pni()
+        pni = deep_scrape_pni()
         
         if pni is not None:
-            message = json.dumps({
-                "type": "pni_update",
-                "timestamp": time.time(),
-                "pni": pni
-            })
+            # 1. 將新數據存入資料庫
+            db = SessionLocal()
+            try:
+                new_record = PniRecord(pni=pni)
+                db.add(new_record)
+                db.commit()
+                print(f"PNI {pni:.2f}% 已成功存入資料庫。")
+            except SQLAlchemyError as e:
+                print(f"[錯誤] 寫入資料庫失敗: {e}")
+                db.rollback()
+            finally:
+                db.close()
+
+            # 2. 廣播最新數據
+            message = json.dumps({"type": "pni_update", "timestamp": time.time(), "pni": pni})
             await manager.broadcast(message)
-            print(f"已廣播 PNI 數據: {pni:.2f}%")
+            print(f"已廣播最新 PNI 數據。")
         
-        await asyncio.sleep(10) # 每 10 秒執行一次
+        # 將爬取週期拉長為 3 分鐘 (180秒)，以確保穩定性
+        await asyncio.sleep(180)
 
 # --- API Endpoints ---
 @app.on_event("startup")
 async def startup_event():
-    """在應用啟動時，開始背景廣播任務"""
-    asyncio.create_task(broadcast_pni_periodically())
+    asyncio.create_task(scrape_and_save_periodically())
 
 @app.get("/")
 def read_root():
-    """HTTP 端點，用於回應 Pinger 服務，防止休眠"""
-    return {"status": "PTT Scraper WebSocket server is alive"}
+    return {"status": "PTT Scraper API is alive"}
+
+@app.get("/api/history")
+def get_history(timescale: str = "30m"):
+    db = SessionLocal()
+    try:
+        if timescale == "30m":
+            start_time = datetime.utcnow() - timedelta(hours=24)
+        elif timescale == "1h":
+            start_time = datetime.utcnow() - timedelta(days=3)
+        else: # day
+            start_time = datetime.utcnow() - timedelta(days=30)
+            
+        records = db.query(PniRecord).filter(PniRecord.timestamp >= start_time).order_by(desc(PniRecord.timestamp)).all()
+        
+        # 這部分可以在前端做，但為了示範，這裡也可以做簡單的彙總
+        # 為保持簡單，我們先回傳原始數據點，讓前端處理
+        return [{"timestamp": r.timestamp.isoformat(), "pni": r.pni} for r in records]
+
+    except SQLAlchemyError as e:
+        print(f"[錯誤] 查詢歷史數據失敗: {e}")
+        return {"error": "Could not retrieve history"}
+    finally:
+        db.close()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket 端點，處理客戶端的連接"""
     await manager.connect(websocket)
     try:
         while True:
