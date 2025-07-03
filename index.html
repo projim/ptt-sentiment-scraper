@@ -66,8 +66,10 @@
     </div>
 
     <script>
-    // [FIX] 使用 DOMContentLoaded 事件確保所有腳本都載入後才執行
     document.addEventListener('DOMContentLoaded', () => {
+        // [FIX] 為了穩定性，從全域物件中預先解構出所有會用到的 date-fns 函式
+        const { format, setMinutes, startOfHour } = window.dateFns || {};
+
         const baselineDateEl = document.getElementById('baseline-date');
         const timeUnitEl = document.getElementById('time-unit');
         const baselineValueEl = document.getElementById('baseline-value');
@@ -214,6 +216,9 @@
             loadingOverlay.style.display = 'flex';
             loadingText.textContent = `正在從資料庫獲取 ${timescale} 歷史數據...`;
             try {
+                if (!format) { // 檢查 date-fns 是否已成功載入
+                    throw new Error("date-fns library not loaded.");
+                }
                 const response = await fetch(`${API_BASE_URL}/api/history?timescale=${timescale}`);
                 if (!response.ok) throw new Error('Network response was not ok');
                 const history = await response.json();
@@ -230,7 +235,7 @@
 
             } catch (error) {
                 console.error('獲取歷史數據失敗:', error);
-                analysisText.innerHTML = "無法從資料庫獲取歷史數據。請稍後再試。";
+                analysisText.innerHTML = "無法從資料庫獲取歷史數據。請稍後再試。錯誤：" + error.message;
             } finally {
                 loadingOverlay.style.display = 'none';
             }
@@ -243,10 +248,10 @@
                 const date = new Date(ts);
                 if (scale === '30m') {
                     const minutes = Math.floor(date.getMinutes() / 30) * 30;
-                    return dateFns.format(dateFns.setMinutes(dateFns.startOfHour(date), minutes), "yyyy-MM-dd'T'HH:mm:ss");
+                    return format(setMinutes(startOfHour(date), minutes), "yyyy-MM-dd'T'HH:mm:ss");
                 }
                 if (scale === '1h') {
-                    return dateFns.format(dateFns.startOfHour(date), "yyyy-MM-dd'T'HH:mm:ss");
+                    return format(startOfHour(date), "yyyy-MM-dd'T'HH:mm:ss");
                 }
                 return '';
             };
@@ -306,9 +311,9 @@
             if (mode === 'realtime') {
                 analysis += `最近一小時的即時數據顯示，情緒高峰趨勢為 **${peakPoint.y > 0 ? '+' : ''}${peakPoint.y.toFixed(1)}%**。`;
             } else if (mode === '30m') {
-                analysis += `過去24小時的彙總數據顯示，情緒高峰出現在 **${dateFns.format(peakPoint.x, 'HH:mm')}** 左右，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
-            } else {
-                analysis += `過去3天的彙總數據顯示，情緒高峰出現在 **${dateFns.format(peakPoint.x, 'MM/dd HH:00')}**，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
+                analysis += `過去24小時的彙總數據顯示，情緒高峰出現在 **${format(peakPoint.x, 'HH:mm')}** 左右，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
+            } else { // '1h'
+                analysis += `過去3天的彙總數據顯示，情緒高峰出現在 **${format(peakPoint.x, 'MM/dd HH:00')}**，高出基準 **${peakPoint.y.toFixed(1)}%**。`;
             }
             analysis += ` 目前最新的趨勢指數為 **${lastPoint.y > 0 ? '+' : ''}${lastPoint.y.toFixed(1)}%**。`;
             analysisText.innerHTML = analysis;
