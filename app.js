@@ -26,12 +26,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let mainInterval;
     let countdownInterval;
     let currentDiscountData = null;
-    let ppiHistoryForChart = [];
 
     const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render 上設定的服務名稱
     const API_BASE_URL = `https://${serviceName}.onrender.com`;
+    const WEBSOCKET_URL = `wss://${serviceName}.onrender.com/ws`;
     
-    // [FIX] 還原完整的圖表設定
     const chartConfig = {
         type: 'line',
         data: {
@@ -64,56 +63,69 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    function connectWebSocket() {
+        const ws = new WebSocket(WEBSOCKET_URL);
+
+        ws.onopen = () => {
+            connectionStatusEl.textContent = "已連接，等待即時更新...";
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'ppi_update' && sentimentChart) {
+                const newPoint = { x: new Date(data.timestamp * 1000), y: data.ppi };
+                const chartData = sentimentChart.data.datasets[0].data;
+                
+                chartData.push(newPoint);
+                if (chartData.length > 60) { // 始終保持最多 60 個數據點
+                    chartData.shift();
+                }
+                sentimentChart.update('quiet');
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("WebSocket 連接已斷開，5秒後重連...");
+            connectionStatusEl.textContent = "已斷線，嘗試重新連接...";
+            // 這裡可以加入重連邏輯
+            setTimeout(connectWebSocket, 5000);
+        };
+
+        ws.onerror = (error) => {
+            console.error("WebSocket 發生錯誤:", error);
+            connectionStatusEl.textContent = "WebSocket 連線錯誤。";
+        };
+    }
+
     async function fetchDiscount() {
         try {
-            connectionStatusEl.textContent = "正在獲取最新折扣...";
             const response = await fetch(`${API_BASE_URL}/api/current-discount`);
-            if (!response.ok) {
-                throw new Error(`Network response was not ok (${response.status})`);
-            }
+            if (!response.ok) throw new Error(`Network response was not ok (${response.status})`);
             const data = await response.json();
-
-            if (data.error) {
-                throw new Error(data.error);
-            }
+            if (data.error) throw new Error(data.error);
             
-            connectionStatusEl.textContent = `上次更新：${new Date().toLocaleTimeString('zh-TW')}`;
             currentDiscountData = data;
             generateCodeBtn.disabled = false;
-            updateUI(data);
+            updateUIDisplay(data);
             startCountdown();
 
         } catch (error) {
             console.error('獲取折扣失敗:', error);
-            connectionStatusEl.textContent = "獲取失敗，將於下一分鐘重試...";
+            connectionStatusEl.textContent = "獲取折扣失敗，將於下一分鐘重試...";
             discountDisplayEl.textContent = "N/A";
             generateCodeBtn.disabled = true;
         }
     }
 
-    function updateUI(data) {
+    function updateUIDisplay(data) {
         const { current_ppi, final_discount_percentage, settings } = data;
         const discountValue = (100 - final_discount_percentage) / 10;
         discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
         ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
         const { base_discount, ppi_threshold, conversion_factor } = settings;
         formulaDisplayEl.textContent = `${base_discount}% + (${current_ppi.toFixed(1)}% - ${ppi_threshold}%) * ${conversion_factor}`;
-
-        // 更新圖表數據
-        ppiHistoryForChart.push({ x: new Date(), y: current_ppi });
-        if (ppiHistoryForChart.length > 60) {
-            ppiHistoryForChart.shift();
-        }
-        updateChartDisplay(ppiHistoryForChart);
     }
     
-    function updateChartDisplay(data) {
-        if (!sentimentChart || !sentimentChart.data || !sentimentChart.data.datasets) return;
-        
-        sentimentChart.data.datasets[0].data = data;
-        sentimentChart.update('quiet');
-    }
-
     function startCountdown() {
         clearInterval(countdownInterval);
         let seconds = 60;
@@ -130,14 +142,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
     
-    // [FIX] 還原完整的 Barcode 顯示邏輯
     function showBarcode() {
         if (!currentDiscountData) return;
-
         codeModal.classList.remove('hidden');
-
         const discountCode = `MILK-${currentDiscountData.final_discount_percentage.toFixed(2)}-${Date.now()}`;
-        
         JsBarcode("#barcode", discountCode, {
             format: "CODE128",
             lineColor: "#000",
@@ -146,7 +154,6 @@ document.addEventListener('DOMContentLoaded', () => {
             displayValue: true,
             fontSize: 18
         });
-
         let seconds = 60;
         codeCountdownEl.textContent = seconds;
         const codeInterval = setInterval(() => {
@@ -158,13 +165,39 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
 
-    function initialize() {
+    // [UPDATE] 新的、更穩健的啟動流程
+    async function initialize() {
+        connectionStatusEl.textContent = "正在載入歷史數據...";
+        
+        // 1. 初始化一個空的圖表
         sentimentChart = new Chart(ctx, chartConfig);
-        updateChartDisplay([]);
 
-        fetchDiscount();
+        // 2. 透過 API 獲取並填滿歷史數據
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/history?timescale=realtime`);
+            if (!response.ok) throw new Error('無法獲取歷史數據');
+            const history = await response.json();
+            if(history.error) throw new Error(history.error);
+
+            const initialData = history.map(p => ({ x: new Date(p.timestamp), y: p.ppi }));
+            sentimentChart.data.datasets[0].data = initialData;
+            sentimentChart.update();
+            console.log(`已成功載入 ${initialData.length} 筆歷史數據。`);
+        } catch (error) {
+            console.error("初始化圖表歷史數據失敗:", error);
+            connectionStatusEl.textContent = "載入歷史數據失敗。";
+        }
+
+        // 3. 獲取當前折扣
+        await fetchDiscount();
+
+        // 4. 建立 WebSocket 連線以接收即時更新
+        connectWebSocket();
+
+        // 5. 設定每分鐘的折扣更新
         mainInterval = setInterval(fetchDiscount, 60000);
 
+        // 6. 綁定按鈕事件
         generateCodeBtn.addEventListener('click', showBarcode);
         closeModalBtn.addEventListener('click', () => {
             codeModal.classList.add('hidden');
