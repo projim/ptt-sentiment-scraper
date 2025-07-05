@@ -14,8 +14,7 @@ from datetime import datetime, timedelta
 # --- FastAPI App & CORS ---
 app = FastAPI()
 
-# [FIX] 放寬 CORS 策略以解決 WebSocket 403 Forbidden 問題
-# 允許所有來源。在生產環境中，理想情況下應指定具體的前端網址。
+# 允許所有來源，以解決 WebSocket 的 403 Forbidden 問題
 origins = ["*"] 
 
 app.add_middleware(
@@ -191,8 +190,48 @@ def read_root():
 
 @app.get("/api/current-discount")
 def get_current_discount():
-    # ... (此 API 邏輯與之前版本相同)
-    pass
+    """[FIX] 還原完整的折扣計算邏輯"""
+    if SessionLocal is None:
+        return {"error": "Database not connected", "final_discount_percentage": 0}
+    
+    db = SessionLocal()
+    try:
+        # 1. 讀取折扣設定
+        settings_query = db.query(DiscountSetting).all()
+        settings = {s.setting_name: s.setting_value for s in settings_query}
+        
+        base_discount = settings.get("base_discount", 5.0)
+        ppi_threshold = settings.get("ppi_threshold", 60.0)
+        conversion_factor = settings.get("conversion_factor", 0.25)
+        discount_cap = settings.get("discount_cap", 25.0)
+
+        # 2. 計算過去 15 分鐘的滾動平均 PPI
+        start_time = datetime.utcnow() - timedelta(minutes=15)
+        avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
+        
+        current_ppi = avg_ppi_query if avg_ppi_query is not None else 0.0
+
+        # 3. 執行公式
+        extra_discount = 0
+        if current_ppi > ppi_threshold:
+            extra_discount = (current_ppi - ppi_threshold) * conversion_factor
+        
+        final_discount = base_discount + extra_discount
+        
+        # 4. 套用上限
+        final_discount = min(final_discount, discount_cap)
+
+        return {
+            "current_ppi": round(current_ppi, 2),
+            "final_discount_percentage": round(final_discount, 2),
+            "settings": settings
+        }
+    except Exception as e:
+        print(f"[錯誤] 計算折扣時發生錯誤: {e}")
+        return {"error": "Could not calculate discount", "final_discount_percentage": 0}
+    finally:
+        db.close()
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, request: Request):
@@ -205,4 +244,3 @@ async def websocket_endpoint(websocket: WebSocket, request: Request):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
