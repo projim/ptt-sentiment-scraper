@@ -61,6 +61,24 @@ def initialize_database():
         print("正在檢查並創建資料庫表格...")
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
+        
+        db = SessionLocal()
+        try:
+            default_settings = {
+                "base_discount": 5.0,
+                "ppi_threshold": 60.0,
+                "conversion_factor": 0.25,
+                "discount_cap": 25.0
+            }
+            for key, value in default_settings.items():
+                existing_setting = db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).first()
+                if not existing_setting:
+                    new_setting = DiscountSetting(setting_name=key, setting_value=value)
+                    db.add(new_setting)
+                    print(f"已初始化預設折扣設定: {key} = {value}")
+            db.commit()
+        finally:
+            db.close()
         return True
     except Exception as e:
         print(f"[重大錯誤] 資料庫初始化失敗: {e}")
@@ -73,6 +91,7 @@ cookies = {"over18": "1"}
 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
 async def deep_scrape_ppi():
+    """[FIX] 還原完整的非同步深度分析邏輯"""
     try:
         async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=40) as client:
             response = await client.get(GOSSIPING_BOARD_URL)
@@ -100,6 +119,7 @@ async def deep_scrape_ppi():
         return None
 
 async def scrape_article(client: httpx.AsyncClient, url: str):
+    """[FIX] 還原完整的單一文章爬取邏輯"""
     try:
         await asyncio.sleep(0.25)
         article_res = await client.get(url, timeout=15)
@@ -113,6 +133,7 @@ async def scrape_article(client: httpx.AsyncClient, url: str):
 
 # --- WebSocket & Background Task ---
 class ConnectionManager:
+    """[FIX] 還原完整的 WebSocket 管理邏輯"""
     def __init__(self):
         self.active_connections: list[WebSocket] = []
     async def connect(self, websocket: WebSocket):
@@ -128,12 +149,10 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 async def scrape_and_save_periodically():
-    # [FIX] 等待 15 秒，讓伺服器完全穩定後再開始
     print("背景任務已排程，將在 15 秒後開始第一次爬取...")
     await asyncio.sleep(15)
-
     while True:
-        try: # [FIX] 加入最強大的錯誤保護層
+        try:
             ppi = await deep_scrape_ppi()
             if ppi is not None:
                 db = SessionLocal()
@@ -172,11 +191,45 @@ def read_root():
 
 @app.get("/api/current-discount")
 def get_current_discount():
-    # ... (此 API 邏輯與之前版本相同)
-    pass
+    if SessionLocal is None:
+        return {"error": "Database not connected", "final_discount_percentage": 0}
+    
+    db = SessionLocal()
+    try:
+        settings_query = db.query(DiscountSetting).all()
+        settings = {s.setting_name: s.setting_value for s in settings_query}
+        
+        base_discount = settings.get("base_discount", 5.0)
+        ppi_threshold = settings.get("ppi_threshold", 60.0)
+        conversion_factor = settings.get("conversion_factor", 0.25)
+        discount_cap = settings.get("discount_cap", 25.0)
+
+        start_time = datetime.utcnow() - timedelta(minutes=15)
+        avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
+        
+        current_ppi = avg_ppi_query if avg_ppi_query is not None else 0.0
+
+        extra_discount = 0
+        if current_ppi > ppi_threshold:
+            extra_discount = (current_ppi - ppi_threshold) * conversion_factor
+        
+        final_discount = base_discount + extra_discount
+        final_discount = min(final_discount, discount_cap)
+
+        return {
+            "current_ppi": round(current_ppi, 2),
+            "final_discount_percentage": round(final_discount, 2),
+            "settings": settings
+        }
+    except Exception as e:
+        print(f"[錯誤] 計算折扣時發生錯誤: {e}")
+        return {"error": "Could not calculate discount", "final_discount_percentage": 0}
+    finally:
+        db.close()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    """[FIX] 還原完整的 WebSocket 端點邏輯"""
     await manager.connect(websocket)
     try:
         while True:
