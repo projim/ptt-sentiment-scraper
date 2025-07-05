@@ -36,6 +36,7 @@ ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
 engine = None
 SessionLocal = None
 Base = declarative_base()
+db_ready = False # [NEW] A simple flag to check DB status
 
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
@@ -50,7 +51,7 @@ class DiscountSetting(Base):
 
 def initialize_database():
     """安全地初始化資料庫連線和表格"""
-    global engine, SessionLocal
+    global engine, SessionLocal, db_ready
     if not DATABASE_URL:
         print("[重大錯誤] 找不到環境變數 DATABASE_URL。")
         return False
@@ -78,9 +79,12 @@ def initialize_database():
             print("預設折扣設定已確認。")
         finally:
             db.close()
+        
+        db_ready = True # [NEW] Set flag to True on success
         return True
     except Exception as e:
         print(f"[重大錯誤] 資料庫初始化失敗: {e}")
+        db_ready = False
         return False
 
 # --- PTT Scraper Logic ---
@@ -138,12 +142,17 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 async def scrape_and_save_periodically():
-    # [FIX] 等待 15 秒，讓伺服器完全穩定後再開始
-    print("背景任務已排程，將在 15 秒後開始第一次爬取...")
+    # [NEW] The background task is now responsible for initialization
+    print("背景任務啟動，正在初始化資料庫...")
+    if not initialize_database():
+        print("[背景任務終止] 因資料庫初始化失敗，背景任務無法繼續。")
+        return # Stop the task if DB init fails
+
+    print("背景任務：資料庫已就緒。將在 15 秒後開始第一次爬取...")
     await asyncio.sleep(15)
 
     while True:
-        try: # [FIX] 加入最強大的錯誤保護層，確保爬蟲不會弄垮整個伺服器
+        try:
             ppi = await deep_scrape_ppi()
             if ppi is not None and SessionLocal:
                 db = SessionLocal()
@@ -165,21 +174,22 @@ async def scrape_and_save_periodically():
 # --- API Endpoints & Startup Event ---
 @app.on_event("startup")
 async def startup_event():
+    # [NEW] Startup event is now very lightweight
     print("伺服器啟動中...")
-    # [FIX] 延遲資料庫初始化和背景任務的啟動
-    await asyncio.sleep(5) 
-    if initialize_database():
-        print("正在排程背景爬蟲任務...")
-        asyncio.create_task(scrape_and_save_periodically())
-    print("伺服器已準備就緒，可以接受連線。")
+    print("正在排程背景初始化與爬蟲任務...")
+    asyncio.create_task(scrape_and_save_periodically())
+    print("伺服器已啟動，背景任務將在後台進行初始化。")
 
 @app.get("/")
 def read_root():
     return {"status": "PTT Discount Engine API is alive"}
 
+# [NEW] All API endpoints now check the db_ready flag
 @app.get("/api/current-discount")
 def get_current_discount():
-    if SessionLocal is None: return {"error": "Database not connected"}
+    if not db_ready or SessionLocal is None:
+        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
     db = SessionLocal()
     try:
         settings_query = db.query(DiscountSetting).all()
@@ -206,7 +216,9 @@ def get_current_discount():
 
 @app.get("/api/history")
 def get_history(timescale: str = "realtime"):
-    if SessionLocal is None: return {"error": "Database not connected"}
+    if not db_ready or SessionLocal is None:
+        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
     db = SessionLocal()
     try:
         if timescale == "realtime":
@@ -232,9 +244,12 @@ def get_history(timescale: str = "realtime"):
 
 @app.post("/api/update-settings")
 def update_settings(payload: SettingsUpdate):
+    if not db_ready or SessionLocal is None:
+        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
     if payload.secret_key != ADMIN_SECRET_KEY:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="無效的管理員密碼")
-    if SessionLocal is None: raise HTTPException(status_code=503, detail="資料庫未連接")
+    
     db = SessionLocal()
     try:
         settings_to_update = {
@@ -251,7 +266,9 @@ def update_settings(payload: SettingsUpdate):
 
 @app.get("/api/get-settings")
 def get_settings():
-    if SessionLocal is None: return {"error": "Database not connected"}
+    if not db_ready or SessionLocal is None:
+        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
     db = SessionLocal()
     try:
         settings_query = db.query(DiscountSetting).all()
