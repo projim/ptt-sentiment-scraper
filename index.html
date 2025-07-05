@@ -3,14 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PTT 八卦版輿情分析平台</title>
+    <title>福樂指數---即時折扣</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Inter', 'Noto Sans TC', sans-serif; }
-        .blinking-dot { animation: blinker 1.5s linear infinite; }
-        @keyframes blinker { 50% { opacity: 0; } }
-        input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); cursor: pointer; }
+        .discount-text {
+            /* 為了讓數字跳動更平滑 */
+            font-variant-numeric: tabular-nums;
+        }
     </style>
     <!-- 從本地路徑載入函式庫，並使用 defer 確保執行順序 -->
     <script src="./libs/chart.min.js" defer></script>
@@ -18,53 +19,44 @@
     <script src="./libs/chartjs-adapter-date-fns.bundle.min.js" defer></script>
     <script src="./app.js" defer></script>
 </head>
-<body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-2 sm:p-4">
+<body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-4">
 
-    <div class="w-full max-w-5xl bg-gray-800 rounded-2xl shadow-2xl p-4 sm:p-6 md:p-8">
+    <div class="w-full max-w-2xl bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 text-center">
         
-        <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4">
-            <div>
-                <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-white flex items-center">
-                    <span id="connection-dot" class="blinking-dot text-yellow-500 text-4xl mr-2">●</span>
-                    <span>PTT 八卦版輿情分析平台</span>
-                </h1>
-                <p class="text-xs sm:text-sm text-gray-400 mt-1">
-                    <span id="connection-status">正在初始化...</span> | 
-                    上次更新: <span id="last-updated">--:--:--</span>
-                </p>
+        <!-- 主標題與狀態 -->
+        <h1 class="text-3xl md:text-4xl font-bold text-white">鄉民公道價：牛奶指數</h1>
+        <p class="text-indigo-400 mt-2">PTT 八卦版正向情緒，即時決定您的牛奶折扣！</p>
+        <div id="connection-status" class="mt-4 text-sm text-yellow-400">正在連接伺服器...</div>
+
+        <!-- 主要折扣顯示區 -->
+        <div class="my-8 p-8 bg-gray-900 rounded-2xl border border-indigo-500/30">
+            <p class="text-lg text-gray-400">本分鐘即時折扣</p>
+            <p id="discount-display" class="discount-text text-7xl md:text-8xl font-bold text-green-400 my-2 transition-all duration-500">-- 折</p>
+            <div class="h-10">
+                 <p id="countdown-text" class="text-gray-500">下次價格更新倒數：<span id="countdown-timer" class="font-mono">--</span> 秒</p>
             </div>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div class="bg-gray-900 p-3 rounded-lg">
-                <label for="baseline-date" class="text-sm font-medium text-gray-400">設定基準日</label>
-                <input type="date" id="baseline-date" class="w-full bg-gray-700 text-white rounded-md p-2 mt-1 border-0 focus:ring-2 focus:ring-indigo-500">
+        <!-- 數據細節 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+            <div class="bg-gray-700/50 p-4 rounded-lg">
+                <p class="text-sm text-gray-400">當前情緒指數 (15分鐘平均 PPI)</p>
+                <p id="ppi-display" class="text-2xl font-semibold text-white">-- %</p>
             </div>
-            <div class="bg-gray-900 p-3 rounded-lg">
-                <label for="time-unit" class="text-sm font-medium text-gray-400">選擇時間維度</label>
-                <select id="time-unit" class="w-full bg-gray-700 text-white rounded-md p-2 mt-1 border-0 focus:ring-2 focus:ring-indigo-500">
-                    <option value="realtime">即時 (最近一小時)</option>
-                    <option value="30m">每 30 分鐘 (過去一天)</option>
-                    <option value="1h">每小時 (過去三天)</option>
-                </select>
-            </div>
-            <div class="bg-gray-900 p-3 rounded-lg">
-                 <label class="text-sm font-medium text-gray-400">基準日負面指數 (PNI)</label>
-                 <p id="baseline-value" class="text-2xl font-bold text-indigo-400 mt-1">-- %</p>
+            <div class="bg-gray-700/50 p-4 rounded-lg">
+                <p class="text-sm text-gray-400">折扣計算公式</p>
+                <p id="formula-display" class="text-lg font-mono text-white truncate">讀取中...</p>
             </div>
         </div>
 
-        <div class="bg-gray-900 p-4 rounded-xl relative h-64 md:h-96">
-            <canvas id="sentimentChart"></canvas>
-            <div id="loading-overlay" class="absolute inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center rounded-xl z-10">
-                <p id="loading-text" class="text-white text-lg text-center p-4 animate-pulse">等待應用程式啟動...</p>
+        <!-- 歷史趨勢圖表 -->
+        <div class="mt-8">
+            <h2 class="text-lg font-bold text-white mb-2">過去一小時情緒走勢</h2>
+            <div class="bg-gray-900 p-4 rounded-xl h-48">
+                <canvas id="sentimentChart"></canvas>
             </div>
         </div>
 
-        <div class="mt-6 bg-gray-900 p-6 rounded-xl">
-            <h2 class="text-xl font-bold text-white mb-3">趨勢解讀</h2>
-            <p id="analysis-text" class="text-gray-300 leading-relaxed">請設定基準日以開始分析。</p>
-        </div>
     </div>
 </body>
 </html>
