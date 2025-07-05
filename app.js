@@ -30,6 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render 上設定的服務名稱
     const API_BASE_URL = `https://${serviceName}.onrender.com`;
     
+    // [UPDATE] 全新的、更詳細的圖表設定
     const chartConfig = {
         type: 'line',
         data: {
@@ -48,21 +49,81 @@ document.addEventListener('DOMContentLoaded', () => {
             responsive: true,
             maintainAspectRatio: false,
             scales: {
-                x: { 
+                x: {
                     type: 'time',
-                    time: { unit: 'minute', tooltipFormat: 'HH:mm', displayFormats: { minute: 'HH:mm' } },
-                    display: false 
+                    time: {
+                        unit: 'minute',
+                        tooltipFormat: 'HH:mm:ss', // 提示框顯示到秒
+                        displayFormats: {
+                            minute: 'HH:mm' // X 軸只顯示小時和分鐘
+                        }
+                    },
+                    display: true, // 顯示 X 軸
+                    grid: {
+                        color: 'rgba(255, 255, 255, 0.1)'
+                    },
+                    ticks: {
+                        color: 'rgba(255, 255, 255, 0.7)',
+                        maxRotation: 0,
+                        autoSkip: true,
+                        maxTicksLimit: 7 // 最多顯示 7 個時間刻度，避免擁擠
+                    }
                 },
-                y: { display: false }
+                y: {
+                    display: true, // 顯示 Y 軸
+                    grid: {
+                        color: 'rgba(255, 255, 255, 0.1)'
+                    },
+                    ticks: {
+                        color: 'rgba(255, 255, 255, 0.7)',
+                        callback: function(value) {
+                            return value.toFixed(1) + '%'; // 刻度顯示到小數點後一位
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: '正向情緒指數 (PPI)',
+                        color: 'rgba(255, 255, 255, 0.9)'
+                    }
+                }
             },
             plugins: {
                 legend: { display: false },
-                tooltip: { enabled: false }
+                tooltip: {
+                    enabled: true, // 啟用提示框
+                    mode: 'index',
+                    intersect: false,
+                    callbacks: {
+                        title: function(context) {
+                            return format(context[0].parsed.x, 'HH:mm:ss');
+                        },
+                        label: function(context) {
+                            return `PPI: ${context.parsed.y.toFixed(2)}%`; // 提示框顯示到小數點後兩位
+                        }
+                    }
+                }
             }
         }
     };
 
-    // [UPDATE] 新的 WebSocket 連接邏輯，只負責接收新數據點
+    async function initializeChartWithHistory() {
+        try {
+            connectionStatusEl.textContent = "正在載入歷史數據...";
+            const response = await fetch(`${API_BASE_URL}/api/history?timescale=realtime`);
+            if (!response.ok) throw new Error('無法獲取歷史數據');
+            const history = await response.json();
+            if(history.error) throw new Error(history.error);
+
+            const initialData = history.map(p => ({ x: new Date(p.timestamp), y: p.ppi }));
+            sentimentChart.data.datasets[0].data = initialData;
+            sentimentChart.update();
+            console.log(`已成功載入 ${initialData.length} 筆歷史數據。`);
+        } catch (error) {
+            console.error("初始化圖表歷史數據失敗:", error);
+            connectionStatusEl.textContent = "載入歷史數據失敗。";
+        }
+    }
+
     function connectWebSocket() {
         const WEBSOCKET_URL = `wss://${serviceName}.onrender.com/ws`;
         const ws = new WebSocket(WEBSOCKET_URL);
@@ -78,7 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const chartData = sentimentChart.data.datasets[0].data;
                 
                 chartData.push(newPoint);
-                if (chartData.length > 60) { // 始終保持最多 60 個數據點
+                if (chartData.length > 60) {
                     chartData.shift();
                 }
                 sentimentChart.update('quiet');
@@ -111,13 +172,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         } catch (error) {
             console.error('獲取折扣失敗:', error);
-            connectionStatusEl.textContent = "獲取折扣失敗，將於下一分鐘重試...";
+            connectionStatusEl.textContent = "獲取失敗，將於下一分鐘重試...";
             discountDisplayEl.textContent = "N/A";
             generateCodeBtn.disabled = true;
         }
     }
 
-    // [UPDATE] UI 更新函式，不再負責圖表數據
     function updateUIDisplay(data) {
         const { current_ppi, final_discount_percentage, settings } = data;
         const discountValue = (100 - final_discount_percentage) / 10;
@@ -151,43 +211,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const codeInterval = setInterval(() => {
             seconds--;
             codeCountdownEl.textContent = seconds;
-            if (seconds <= 0 || codeModal.classList.contains('hidden')) clearInterval(codeInterval);
+            if (seconds <= 0 || codeModal.classList.contains('hidden')) {
+                clearInterval(codeInterval);
+            }
         }, 1000);
     }
 
-    // [NEW] 新的、更穩健的啟動流程
     async function initialize() {
-        connectionStatusEl.textContent = "正在載入歷史數據...";
-        
-        // 1. 初始化一個空的圖表
         sentimentChart = new Chart(ctx, chartConfig);
-
-        // 2. 透過 API 獲取並預先填滿圖表的歷史數據
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/history?timescale=realtime`);
-            if (!response.ok) throw new Error('無法獲取歷史數據');
-            const history = await response.json();
-            if(history.error) throw new Error(history.error);
-
-            const initialData = history.map(p => ({ x: new Date(p.timestamp), y: p.ppi }));
-            sentimentChart.data.datasets[0].data = initialData;
-            sentimentChart.update();
-            console.log(`已成功載入 ${initialData.length} 筆歷史數據。`);
-        } catch (error) {
-            console.error("初始化圖表歷史數據失敗:", error);
-            connectionStatusEl.textContent = "載入歷史數據失敗。";
-        }
-
-        // 3. 獲取當前折扣 (在圖表畫好之後)
+        await initializeChartWithHistory();
         await fetchDiscount();
-
-        // 4. 建立 WebSocket 連線以接收新的即時更新
         connectWebSocket();
-
-        // 5. 設定每分鐘的折扣更新
         mainInterval = setInterval(fetchDiscount, 60000);
-
-        // 6. 綁定按鈕事件
         generateCodeBtn.addEventListener('click', showBarcode);
         closeModalBtn.addEventListener('click', () => {
             codeModal.classList.add('hidden');
