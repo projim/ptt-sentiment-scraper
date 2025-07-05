@@ -91,7 +91,6 @@ cookies = {"over18": "1"}
 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
 async def deep_scrape_ppi():
-    """[FIX] 還原完整的非同步深度分析邏輯"""
     try:
         async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=40) as client:
             response = await client.get(GOSSIPING_BOARD_URL)
@@ -119,7 +118,6 @@ async def deep_scrape_ppi():
         return None
 
 async def scrape_article(client: httpx.AsyncClient, url: str):
-    """[FIX] 還原完整的單一文章爬取邏輯"""
     try:
         await asyncio.sleep(0.25)
         article_res = await client.get(url, timeout=15)
@@ -131,23 +129,7 @@ async def scrape_article(client: httpx.AsyncClient, url: str):
         print(f"[警告] 爬取內頁 {url} 失敗: {e}")
         return 0, 0
 
-# --- WebSocket & Background Task ---
-class ConnectionManager:
-    """[FIX] 還原完整的 WebSocket 管理邏輯"""
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        print(f"新的客戶端連接: {websocket.client.host}")
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        print(f"客戶端斷開連接: {websocket.client.host}")
-    async def broadcast(self, message: str):
-        await asyncio.gather(*[connection.send_text(message) for connection in self.active_connections])
-
-manager = ConnectionManager()
-
+# --- Background Task ---
 async def scrape_and_save_periodically():
     print("背景任務已排程，將在 15 秒後開始第一次爬取...")
     await asyncio.sleep(15)
@@ -161,8 +143,6 @@ async def scrape_and_save_periodically():
                     db.add(new_record)
                     db.commit()
                     print(f"PPI {ppi:.2f}% 已成功存入資料庫。")
-                    message = json.dumps({"type": "ppi_update", "timestamp": time.time(), "ppi": ppi})
-                    await manager.broadcast(message)
                 except SQLAlchemyError as e:
                     print(f"[錯誤] 寫入資料庫失敗: {e}")
                     db.rollback()
@@ -196,8 +176,10 @@ def get_current_discount():
     
     db = SessionLocal()
     try:
+        print("[API] /api/current-discount 被呼叫")
         settings_query = db.query(DiscountSetting).all()
         settings = {s.setting_name: s.setting_value for s in settings_query}
+        print(f"[API] 讀取到的折扣設定: {settings}")
         
         base_discount = settings.get("base_discount", 5.0)
         ppi_threshold = settings.get("ppi_threshold", 60.0)
@@ -206,7 +188,9 @@ def get_current_discount():
 
         start_time = datetime.utcnow() - timedelta(minutes=15)
         avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
+        print(f"[API] 過去 15 分鐘的平均 PPI: {avg_ppi_query}")
         
+        # [FIX] 即使沒有數據，也安全地回傳一個預設值 0
         current_ppi = avg_ppi_query if avg_ppi_query is not None else 0.0
 
         extra_discount = 0
@@ -215,6 +199,7 @@ def get_current_discount():
         
         final_discount = base_discount + extra_discount
         final_discount = min(final_discount, discount_cap)
+        print(f"[API] 計算出的最終折扣百分比: {final_discount}")
 
         return {
             "current_ppi": round(current_ppi, 2),
@@ -226,13 +211,3 @@ def get_current_discount():
         return {"error": "Could not calculate discount", "final_discount_percentage": 0}
     finally:
         db.close()
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """[FIX] 還原完整的 WebSocket 端點邏輯"""
-    await manager.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
