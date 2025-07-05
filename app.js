@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     // 檢查函式庫
-    if (typeof Chart === 'undefined' || typeof window.dateFns === 'undefined') {
+    if (typeof Chart === 'undefined' || typeof window.dateFns === 'undefined' || typeof JsBarcode === 'undefined') {
         console.error("Fatal Error: A required library failed to load.");
         document.getElementById('connection-status').innerHTML = "關鍵函式庫載入失敗，請刷新頁面重試。";
         return;
@@ -31,7 +31,38 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render 上設定的服務名稱
     const API_BASE_URL = `https://${serviceName}.onrender.com`;
     
-    const chartConfig = { /* ... (與之前版本相同) ... */ };
+    // [FIX] 還原完整的圖表設定
+    const chartConfig = {
+        type: 'line',
+        data: {
+            datasets: [{
+                label: 'PPI 指數',
+                data: [],
+                borderColor: 'rgba(52, 211, 153, 0.8)',
+                backgroundColor: 'rgba(52, 211, 153, 0.2)',
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.4,
+                fill: true,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: { 
+                    type: 'time',
+                    time: { unit: 'minute', tooltipFormat: 'HH:mm', displayFormats: { minute: 'HH:mm' } },
+                    display: false 
+                },
+                y: { display: false }
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: { enabled: false }
+            }
+        }
+    };
 
     async function fetchDiscount() {
         try {
@@ -77,7 +108,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function updateChartDisplay(data) {
-        if (!sentimentChart) return;
+        if (!sentimentChart || !sentimentChart.data || !sentimentChart.data.datasets) return;
+        
         sentimentChart.data.datasets[0].data = data;
         sentimentChart.update('quiet');
     }
@@ -98,16 +130,38 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
     
+    // [FIX] 還原完整的 Barcode 顯示邏輯
     function showBarcode() {
-        // ... (與之前版本相同) ...
+        if (!currentDiscountData) return;
+
+        codeModal.classList.remove('hidden');
+
+        const discountCode = `MILK-${currentDiscountData.final_discount_percentage.toFixed(2)}-${Date.now()}`;
+        
+        JsBarcode("#barcode", discountCode, {
+            format: "CODE128",
+            lineColor: "#000",
+            width: 2,
+            height: 80,
+            displayValue: true,
+            fontSize: 18
+        });
+
+        let seconds = 60;
+        codeCountdownEl.textContent = seconds;
+        const codeInterval = setInterval(() => {
+            seconds--;
+            codeCountdownEl.textContent = seconds;
+            if (seconds <= 0 || codeModal.classList.contains('hidden')) {
+                clearInterval(codeInterval);
+            }
+        }, 1000);
     }
 
     function initialize() {
-        // [FIX] 立即初始化一個空的圖表
         sentimentChart = new Chart(ctx, chartConfig);
         updateChartDisplay([]);
 
-        // [FIX] 立即啟動計時器，確保即使第一次失敗也能重試
         fetchDiscount();
         mainInterval = setInterval(fetchDiscount, 60000);
 
