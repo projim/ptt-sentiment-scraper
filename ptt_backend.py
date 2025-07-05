@@ -202,14 +202,32 @@ def get_current_discount():
         avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
         current_ppi = avg_ppi_query if avg_ppi_query is not None else 0.0
 
-        extra_discount = max(0, (current_ppi - ppi_threshold) * conversion_factor)
-        final_discount = min(base_discount + extra_discount, discount_cap)
+        # [NEW] 數據回溯機制
+        if current_ppi == 0.0:
+            print("[API] 15分鐘內無數據，正在嘗試回溯最後一筆有效PPI...")
+            last_valid_ppi_record = db.query(SentimentRecord.ppi).filter(SentimentRecord.ppi > 0).order_by(SentimentRecord.timestamp.desc()).first()
+            if last_valid_ppi_record:
+                current_ppi = last_valid_ppi_record[0] # The result is a tuple
+                print(f"[API] 已成功回溯，使用最後一筆有效PPI: {current_ppi:.2f}%")
+            else:
+                print("[API] 資料庫中無任何有效歷史數據，PPI 將使用 0。")
+
+        extra_discount = 0
+        if current_ppi > ppi_threshold:
+            extra_discount = (current_ppi - ppi_threshold) * conversion_factor
+        
+        final_discount = base_discount + extra_discount
+        final_discount = min(final_discount, discount_cap)
+        print(f"[API] 計算出的最終折扣百分比: {final_discount}")
 
         return {
             "current_ppi": round(current_ppi, 2),
             "final_discount_percentage": round(final_discount, 2),
             "settings": settings
         }
+    except Exception as e:
+        print(f"[錯誤] 計算折扣時發生錯誤: {e}")
+        raise HTTPException(status_code=500, detail="計算折扣時發生內部錯誤")
     finally:
         db.close()
 
