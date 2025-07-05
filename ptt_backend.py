@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 # --- FastAPI App & CORS ---
 app = FastAPI()
-origins = ["*"]
+origins = ["*"] # 允許所有來源，以解決 WebSocket 的 403 Forbidden 問題
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -34,7 +34,13 @@ class SentimentRecord(Base):
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
     ppi = Column(Float, index=True)
 
+class DiscountSetting(Base):
+    __tablename__ = "discount_settings"
+    setting_name = Column(String, primary_key=True, index=True)
+    setting_value = Column(Float)
+
 def initialize_database():
+    """安全地初始化資料庫連線和表格"""
     global engine, SessionLocal
     if not DATABASE_URL:
         print("[重大錯誤] 找不到環境變數 DATABASE_URL。")
@@ -48,6 +54,20 @@ def initialize_database():
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
+
+        # 初始化預設折扣設定
+        db = SessionLocal()
+        try:
+            default_settings = {
+                "base_discount": 5.0, "ppi_threshold": 60.0,
+                "conversion_factor": 0.25, "discount_cap": 25.0
+            }
+            for key, value in default_settings.items():
+                if not db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).first():
+                    db.add(DiscountSetting(setting_name=key, setting_value=value))
+            db.commit()
+        finally:
+            db.close()
         return True
     except Exception as e:
         print(f"[重大錯誤] 資料庫初始化失敗: {e}")
@@ -91,14 +111,25 @@ async def scrape_article(client: httpx.AsyncClient, url: str):
         print(f"[警告] 爬取內頁 {url} 失敗: {e}")
         return 0, 0
 
-# --- Background Task ---
+# --- WebSocket & Background Task ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+    async def broadcast(self, message: str):
+        await asyncio.gather(*[connection.send_text(message) for connection in self.active_connections])
+
+manager = ConnectionManager()
+
 async def scrape_and_save_periodically():
-    # [FIX] 採用階梯式啟動，給予伺服器充分的穩定時間
     print("背景任務已排程，將在 15 秒後開始第一次爬取...")
     await asyncio.sleep(15)
-
     while True:
-        try: # [FIX] 加入最強大的錯誤保護層，確保爬蟲不會弄垮整個伺服器
+        try:
             ppi = await deep_scrape_ppi()
             if ppi is not None and SessionLocal:
                 db = SessionLocal()
@@ -107,6 +138,8 @@ async def scrape_and_save_periodically():
                     db.add(new_record)
                     db.commit()
                     print(f"PPI {ppi:.2f}% 已成功存入資料庫。")
+                    message = json.dumps({"type": "ppi_update", "timestamp": time.time(), "ppi": ppi})
+                    await manager.broadcast(message)
                 finally:
                     db.close()
         except Exception as e:
@@ -119,7 +152,6 @@ async def scrape_and_save_periodically():
 @app.on_event("startup")
 async def startup_event():
     print("伺服器啟動中...")
-    # [FIX] 延遲資料庫初始化和背景任務的啟動
     await asyncio.sleep(5) 
     if initialize_database():
         print("正在排程背景爬蟲任務...")
@@ -130,25 +162,64 @@ async def startup_event():
 def read_root():
     return {"status": "PTT Scraper API is alive"}
 
-@app.get("/api/latest-data")
-def get_latest_data():
-    if SessionLocal is None:
-        return {"error": "Database not connected"}
+@app.get("/api/current-discount")
+def get_current_discount():
+    if SessionLocal is None: return {"error": "Database not connected"}
     db = SessionLocal()
     try:
-        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-        history_records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= one_hour_ago).order_by(SentimentRecord.timestamp.asc()).all()
-        history_data = [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in history_records]
-        
-        latest_record = db.query(SentimentRecord).order_by(SentimentRecord.timestamp.desc()).first()
-        latest_ppi = latest_record.ppi if latest_record else 0
+        settings_query = db.query(DiscountSetting).all()
+        settings = {s.setting_name: s.setting_value for s in settings_query}
+        base_discount = settings.get("base_discount", 5.0)
+        ppi_threshold = settings.get("ppi_threshold", 60.0)
+        conversion_factor = settings.get("conversion_factor", 0.25)
+        discount_cap = settings.get("discount_cap", 25.0)
+
+        start_time = datetime.utcnow() - timedelta(minutes=15)
+        avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
+        current_ppi = avg_ppi_query if avg_ppi_query is not None else 0.0
+
+        extra_discount = max(0, (current_ppi - ppi_threshold) * conversion_factor)
+        final_discount = min(base_discount + extra_discount, discount_cap)
 
         return {
-            "latest_ppi": round(latest_ppi, 2),
-            "history": history_data
+            "current_ppi": round(current_ppi, 2),
+            "final_discount_percentage": round(final_discount, 2),
+            "settings": settings
         }
-    except Exception as e:
-        print(f"[錯誤] 獲取最新數據時發生錯誤: {e}")
-        return {"error": "Could not retrieve data"}
     finally:
         db.close()
+
+@app.get("/api/history")
+def get_history(timescale: str = "realtime"):
+    if SessionLocal is None: return {"error": "Database not connected"}
+    db = SessionLocal()
+    try:
+        if timescale == "realtime":
+             start_time = datetime.utcnow() - timedelta(hours=1)
+             records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= start_time).order_by(SentimentRecord.timestamp.asc()).all()
+             return [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in records]
+        
+        interval_map = {"30m": '30 minutes', "1h": '1 hour'}
+        if timescale not in interval_map: return {"error": "Invalid timescale"}
+        
+        start_time_map = {"30m": datetime.utcnow() - timedelta(hours=24), "1h": datetime.utcnow() - timedelta(days=3)}
+        start_time = start_time_map[timescale]
+        interval = interval_map[timescale]
+
+        query = db.query(
+            func.date_trunc(interval, SentimentRecord.timestamp).label('bucket'),
+            func.avg(SentimentRecord.ppi).label('avg_ppi')
+        ).filter(SentimentRecord.timestamp >= start_time).group_by('bucket').order_by('bucket')
+        
+        return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_ppi} for r in query.all()]
+    finally:
+        db.close()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
