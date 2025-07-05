@@ -4,13 +4,14 @@ from bs4 import BeautifulSoup
 import json
 import time
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, status
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 from pydantic import BaseModel
+from fastapi.concurrency import run_in_threadpool
 
 # --- Pydantic Models for Data Validation ---
 class SettingsUpdate(BaseModel):
@@ -36,7 +37,7 @@ ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
 engine = None
 SessionLocal = None
 Base = declarative_base()
-db_ready = False # [NEW] A simple flag to check DB status
+db_ready = False # A simple flag to check DB status
 
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
@@ -50,7 +51,7 @@ class DiscountSetting(Base):
     setting_value = Column(Float)
 
 def initialize_database():
-    """安全地初始化資料庫連線和表格"""
+    """安全地初始化資料庫連線和表格 (這是一個同步函式)"""
     global engine, SessionLocal, db_ready
     if not DATABASE_URL:
         print("[重大錯誤] 找不到環境變數 DATABASE_URL。")
@@ -65,7 +66,6 @@ def initialize_database():
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
 
-        # 初始化預設折扣設定
         db = SessionLocal()
         try:
             default_settings = {
@@ -80,7 +80,7 @@ def initialize_database():
         finally:
             db.close()
         
-        db_ready = True # [NEW] Set flag to True on success
+        db_ready = True
         return True
     except Exception as e:
         print(f"[重大錯誤] 資料庫初始化失敗: {e}")
@@ -142,11 +142,12 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 async def scrape_and_save_periodically():
-    # [NEW] The background task is now responsible for initialization
     print("背景任務啟動，正在初始化資料庫...")
-    if not initialize_database():
+    initialized = await run_in_threadpool(initialize_database)
+
+    if not initialized:
         print("[背景任務終止] 因資料庫初始化失敗，背景任務無法繼續。")
-        return # Stop the task if DB init fails
+        return
 
     print("背景任務：資料庫已就緒。將在 15 秒後開始第一次爬取...")
     await asyncio.sleep(15)
@@ -174,7 +175,6 @@ async def scrape_and_save_periodically():
 # --- API Endpoints & Startup Event ---
 @app.on_event("startup")
 async def startup_event():
-    # [NEW] Startup event is now very lightweight
     print("伺服器啟動中...")
     print("正在排程背景初始化與爬蟲任務...")
     asyncio.create_task(scrape_and_save_periodically())
@@ -184,7 +184,6 @@ async def startup_event():
 def read_root():
     return {"status": "PTT Discount Engine API is alive"}
 
-# [NEW] All API endpoints now check the db_ready flag
 @app.get("/api/current-discount")
 def get_current_discount():
     if not db_ready or SessionLocal is None:
@@ -277,8 +276,9 @@ def get_settings():
         db.close()
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, request: Request):
-    origin = request.headers.get('origin')
+async def websocket_endpoint(websocket: WebSocket):
+    """[FIX] 修正函式定義，移除錯誤的 request 參數"""
+    origin = websocket.headers.get('origin')
     print(f"WebSocket 連線請求來自: {origin}")
     await manager.connect(websocket)
     try:
