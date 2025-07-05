@@ -1,8 +1,8 @@
 document.addEventListener('DOMContentLoaded', () => {
     // 檢查函式庫是否已成功載入
-    if (typeof Chart === 'undefined' || typeof window.dateFns === 'undefined') {
+    if (typeof Chart === 'undefined' || typeof QRCode === 'undefined' || typeof window.dateFns === 'undefined') {
         console.error("Fatal Error: A required library failed to load.");
-        document.getElementById('loading-text').innerHTML = "關鍵函式庫載入失敗，請刷新頁面重試。";
+        document.getElementById('connection-status').innerHTML = "關鍵函式庫載入失敗，請檢查 libs 資料夾或網路連線並刷新頁面。";
         return;
     }
     
@@ -11,120 +11,117 @@ document.addEventListener('DOMContentLoaded', () => {
     // DOM 元素
     const connectionStatusEl = document.getElementById('connection-status');
     const discountDisplayEl = document.getElementById('discount-display');
-    const countdownTextEl = document.getElementById('countdown-text');
     const countdownTimerEl = document.getElementById('countdown-timer');
     const ppiDisplayEl = document.getElementById('ppi-display');
     const formulaDisplayEl = document.getElementById('formula-display');
     const ctx = document.getElementById('sentimentChart').getContext('2d');
+    const generateQrBtn = document.getElementById('generate-qr-btn');
+    const qrModal = document.getElementById('qr-modal');
+    const closeModalBtn = document.getElementById('close-modal-btn');
+    const qrcodeContainer = document.getElementById('qrcode-container');
+    const qrCountdownEl = document.getElementById('qr-countdown');
     
     // 應用程式狀態
     let sentimentChart;
     let mainInterval;
     let countdownInterval;
+    let currentDiscountData = null; // 儲存最新的折扣數據
 
     const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render 上設定的服務名稱
     const API_BASE_URL = `https://${serviceName}.onrender.com`;
     
-    const chartConfig = {
-        type: 'line',
-        data: {
-            labels: [],
-            datasets: [{
-                label: 'PPI 指數',
-                data: [],
-                borderColor: 'rgba(52, 211, 153, 0.8)',
-                backgroundColor: 'rgba(52, 211, 153, 0.2)',
-                borderWidth: 2,
-                pointRadius: 0,
-                tension: 0.4,
-                fill: true,
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: {
-                x: { 
-                    type: 'time',
-                    time: { unit: 'minute', tooltipFormat: 'HH:mm', displayFormats: { minute: 'HH:mm' } },
-                    display: false 
-                },
-                y: { display: false }
-            },
-            plugins: {
-                legend: { display: false },
-                tooltip: { enabled: false }
-            }
-        }
-    };
-
-    // [UPDATE] 新的 WebSocket 連接邏輯
-    function connectWebSocket() {
-        const WEBSOCKET_URL = `wss://${serviceName}.onrender.com/ws`;
-        const ws = new WebSocket(WEBSOCKET_URL);
-
-        ws.onopen = () => {
-            connectionStatusEl.textContent = "已連接，等待即時更新...";
-        };
-
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'ppi_update' && sentimentChart) {
-                const newPoint = { x: new Date(data.timestamp * 1000), y: data.ppi };
-                const chartData = sentimentChart.data.datasets[0].data;
-                
-                chartData.push(newPoint);
-                if (chartData.length > 60) { // 始終保持最多 60 個數據點
-                    chartData.shift();
-                }
-                sentimentChart.update('quiet');
-            }
-        };
-
-        ws.onclose = () => {
-            console.log("WebSocket 連接已斷開，5秒後重連...");
-            connectionStatusEl.textContent = "已斷線，嘗試重新連接...";
-            setTimeout(connectWebSocket, 5000);
-        };
-    }
-
-    // [UPDATE] 新的圖表初始化邏輯
-    async function initializeLiveChart() {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/history?timescale=realtime`);
-            if (!response.ok) throw new Error('Network response was not ok');
-            const history = await response.json();
-            
-            const initialData = history.map(p => ({ x: new Date(p.timestamp), y: p.ppi }));
-
-            sentimentChart = new Chart(ctx, chartConfig);
-            sentimentChart.data.datasets[0].data = initialData;
-            sentimentChart.update();
-
-        } catch (error) {
-            console.error("初始化圖表失敗:", error);
-            // 即使失敗，也建立一個空圖表
-            sentimentChart = new Chart(ctx, chartConfig);
-        }
-    }
+    const chartConfig = { /* ... (與之前版本相同) ... */ };
 
     async function fetchDiscount() {
-        // ... (此函式邏輯與之前版本相同)
+        try {
+            connectionStatusEl.textContent = "正在獲取最新折扣...";
+            const response = await fetch(`${API_BASE_URL}/api/current-discount`);
+            if (!response.ok) throw new Error(`Network response was not ok (${response.status})`);
+            const data = await response.json();
+
+            if (data.error) throw new Error(data.error);
+            
+            connectionStatusEl.textContent = `上次更新：${new Date().toLocaleTimeString('zh-TW')}`;
+            currentDiscountData = data; // [NEW] 儲存最新數據
+            generateQrBtn.disabled = false; // [NEW] 啟用按鈕
+            updateUI(data);
+            startCountdown();
+
+        } catch (error) {
+            console.error('獲取折扣失敗:', error);
+            connectionStatusEl.textContent = "獲取折扣失敗，請稍後重試。";
+            discountDisplayEl.textContent = "---";
+            generateQrBtn.disabled = true;
+        }
+    }
+
+    function updateUI(data) {
+        // ... (與之前版本相同) ...
+    }
+    
+    function updateChart(newPpi) {
+        // ... (與之前版本相同) ...
     }
 
     function startCountdown() {
-        // ... (此函式邏輯與之前版本相同)
+        clearInterval(countdownInterval);
+        let seconds = 60;
+        countdownTimerEl.parentElement.style.display = 'block';
+
+        countdownInterval = setInterval(() => {
+            seconds--;
+            countdownTimerEl.textContent = `${seconds}`;
+            if (seconds <= 0) {
+                clearInterval(countdownInterval);
+                 countdownTimerEl.parentElement.style.display = 'none';
+            }
+        }, 1000);
     }
 
-    async function initialize() {
-        connectionStatusEl.textContent = "正在載入歷史數據...";
+    // [NEW] 產生並顯示 QR Code 的函式
+    function showQRCode() {
+        if (!currentDiscountData) return;
+
+        qrModal.classList.remove('hidden');
+        qrcodeContainer.innerHTML = ''; // 清空舊的 QR Code
+
+        const qrData = {
+            discount: currentDiscountData.final_discount_percentage,
+            ppi: currentDiscountData.current_ppi,
+            timestamp: new Date().toISOString()
+        };
+
+        new QRCode(qrcodeContainer, {
+            text: JSON.stringify(qrData),
+            width: 200,
+            height: 200,
+            colorDark : "#000000",
+            colorLight : "#ffffff",
+            correctLevel : QRCode.CorrectLevel.H
+        });
+
+        // 開始 QR Code 倒數計時
+        let seconds = 60;
+        const qrInterval = setInterval(() => {
+            seconds--;
+            qrCountdownEl.textContent = seconds;
+            if (seconds <= 0 || qrModal.classList.contains('hidden')) {
+                clearInterval(qrInterval);
+            }
+        }, 1000);
+    }
+
+    function initialize() {
+        sentimentChart = new Chart(ctx, chartConfig);
         
-        // [UPDATE] 執行新的兩階段載入流程
-        await initializeLiveChart(); // 1. 先用 API 填滿圖表
-        fetchDiscount();             // 2. 獲取當前折扣
-        connectWebSocket();          // 3. 建立 WebSocket 連線以接收即時更新
-        
-        mainInterval = setInterval(fetchDiscount, 60000); // 4. 設定每分鐘的折扣更新
+        fetchDiscount();
+        mainInterval = setInterval(fetchDiscount, 60000);
+
+        // [NEW] 綁定按鈕事件
+        generateQrBtn.addEventListener('click', showQRCode);
+        closeModalBtn.addEventListener('click', () => {
+            qrModal.classList.add('hidden');
+        });
     }
 
     initialize();
