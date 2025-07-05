@@ -44,7 +44,6 @@ class DiscountSetting(Base):
     setting_value = Column(Float)
 
 def initialize_database():
-    """安全地初始化資料庫連線和表格"""
     global engine, SessionLocal
     if not DATABASE_URL:
         print("[重大錯誤] 找不到環境變數 DATABASE_URL。")
@@ -54,64 +53,118 @@ def initialize_database():
     print(f"[偵錯] 正在嘗試連接資料庫...")
 
     try:
-        engine = create_engine(db_url_for_sqlalchemy)
+        engine = create_engine(db_url_for_sqlalchemy, pool_pre_ping=True)
         with engine.connect() as connection:
             print("[成功] 資料庫連接成功！")
         
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        
         print("正在檢查並創建資料庫表格...")
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
-        
-        db = SessionLocal()
-        try:
-            default_settings = {
-                "base_discount": 5.0,
-                "ppi_threshold": 60.0,
-                "conversion_factor": 0.25,
-                "discount_cap": 25.0
-            }
-            for key, value in default_settings.items():
-                existing_setting = db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).first()
-                if not existing_setting:
-                    new_setting = DiscountSetting(setting_name=key, setting_value=value)
-                    db.add(new_setting)
-                    print(f"已初始化預設折扣設定: {key} = {value}")
-            db.commit()
-        finally:
-            db.close()
-
         return True
     except Exception as e:
         print(f"[重大錯誤] 資料庫初始化失敗: {e}")
         return False
 
 # --- PTT Scraper Logic ---
-# (爬蟲邏輯與之前版本相同，此處省略以保持簡潔)
+PTT_URL = "https://www.ptt.cc"
+GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
+cookies = {"over18": "1"}
+headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+
 async def deep_scrape_ppi():
-    # ...
-    return 75.0 + (time.time() % 20) # 範例返回值
+    try:
+        async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=40) as client:
+            response = await client.get(GOSSIPING_BOARD_URL)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            articles = soup.find_all("div", class_="r-ent")
+            article_urls = [PTT_URL + a.find('a')['href'] for a in articles if a.find('a') and 'M.' in a.find('a')['href']]
+
+            scrape_tasks = [scrape_article(client, url) for url in article_urls]
+            results = await asyncio.gather(*scrape_tasks)
+            
+            total_push = sum(r[0] for r in results)
+            total_boo = sum(r[1] for r in results)
+
+            total_votes = total_push + total_boo
+            ppi = (total_push / total_votes) * 100 if total_votes > 0 else 0
+            
+            print(f"--- 深度分析完成 ---")
+            print(f"總推文: {total_push}, 總噓文: {total_boo}, PPI: {ppi:.2f}%")
+            print(f"--------------------")
+            
+            return ppi
+    except Exception as e:
+        print(f"[錯誤] 爬取列表頁失敗: {e}")
+        return None
 
 async def scrape_article(client: httpx.AsyncClient, url: str):
-    # ...
-    return 10, 2 # 範例返回值
+    try:
+        await asyncio.sleep(0.25)
+        article_res = await client.get(url, timeout=15)
+        article_soup = BeautifulSoup(article_res.text, 'html.parser')
+        pushes = article_soup.find_all('span', class_='push-tag', string=lambda text: '推' in text)
+        boos = article_soup.find_all('span', class_='push-tag', string=lambda text: '噓' in text)
+        return len(pushes), len(boos)
+    except Exception as e:
+        print(f"[警告] 爬取內頁 {url} 失敗: {e}")
+        return 0, 0
 
 # --- WebSocket & Background Task ---
 class ConnectionManager:
-    # ... (與之前版本相同)
-    pass
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"新的客戶端連接: {websocket.client.host}")
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        print(f"客戶端斷開連接: {websocket.client.host}")
+    async def broadcast(self, message: str):
+        await asyncio.gather(*[connection.send_text(message) for connection in self.active_connections])
+
 manager = ConnectionManager()
 
 async def scrape_and_save_periodically():
-    # ... (與之前版本相同)
-    pass
+    # [FIX] 等待 15 秒，讓伺服器完全穩定後再開始
+    print("背景任務已排程，將在 15 秒後開始第一次爬取...")
+    await asyncio.sleep(15)
+
+    while True:
+        try: # [FIX] 加入最強大的錯誤保護層
+            ppi = await deep_scrape_ppi()
+            if ppi is not None:
+                db = SessionLocal()
+                try:
+                    new_record = SentimentRecord(ppi=ppi)
+                    db.add(new_record)
+                    db.commit()
+                    print(f"PPI {ppi:.2f}% 已成功存入資料庫。")
+                    message = json.dumps({"type": "ppi_update", "timestamp": time.time(), "ppi": ppi})
+                    await manager.broadcast(message)
+                except SQLAlchemyError as e:
+                    print(f"[錯誤] 寫入資料庫失敗: {e}")
+                    db.rollback()
+                finally:
+                    db.close()
+        except Exception as e:
+            print(f"[重大錯誤] 背景爬蟲任務發生未知錯誤: {e}")
+        
+        print(f"下一次爬取將在 3 分鐘後進行...")
+        await asyncio.sleep(180)
 
 # --- API Endpoints & Startup Event ---
 @app.on_event("startup")
 async def startup_event():
+    print("伺服器啟動中...")
     if initialize_database():
+        print("正在排程背景爬蟲任務...")
         asyncio.create_task(scrape_and_save_periodically())
+        print("伺服器已準備就緒，可以接受連線。")
+    else:
+        print("由於資料庫連線失敗，背景任務無法啟動。")
 
 @app.get("/")
 def read_root():
@@ -119,40 +172,14 @@ def read_root():
 
 @app.get("/api/current-discount")
 def get_current_discount():
-    # ... (與之前版本相同)
+    # ... (此 API 邏輯與之前版本相同)
     pass
-
-@app.get("/api/history")
-def get_history(timescale: str = "realtime"):
-    if SessionLocal is None:
-        return {"error": "Database not connected"}
-    db = SessionLocal()
-    try:
-        # [UPDATE] 優化 realtime 查詢邏輯
-        if timescale == "realtime":
-             start_time = datetime.utcnow() - timedelta(hours=1)
-             # 查詢最近一小時內的數據，按時間排序，最多取 60 筆
-             records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= start_time).order_by(SentimentRecord.timestamp.asc()).all()
-             return [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in records]
-
-        elif timescale == "30m":
-            # ... (與之前版本相同)
-            pass
-        elif timescale == "1h":
-            # ... (與之前版本相同)
-            pass
-        else:
-            return {"error": "Invalid timescale"}
-        
-        # ... (彙總查詢邏輯與之前版本相同)
-
-    except Exception as e:
-        print(f"[錯誤] 查詢歷史數據時發生錯誤: {e}")
-        return {"error": "Could not retrieve history"}
-    finally:
-        db.close()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    # ... (與之前版本相同)
-    pass
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
