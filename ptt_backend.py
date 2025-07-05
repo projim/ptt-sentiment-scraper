@@ -21,7 +21,7 @@ class SettingsUpdate(BaseModel):
 
 # --- FastAPI App & CORS ---
 app = FastAPI()
-origins = ["*"] # 允許所有來源，以解決 WebSocket 的 403 Forbidden 問題
+origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -128,18 +128,22 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        print(f"新的客戶端連接: {websocket.client.host}")
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
+        print(f"客戶端斷開連接: {websocket.client.host}")
     async def broadcast(self, message: str):
         await asyncio.gather(*[connection.send_text(message) for connection in self.active_connections])
 
 manager = ConnectionManager()
 
 async def scrape_and_save_periodically():
+    # [FIX] 等待 15 秒，讓伺服器完全穩定後再開始
     print("背景任務已排程，將在 15 秒後開始第一次爬取...")
     await asyncio.sleep(15)
+
     while True:
-        try:
+        try: # [FIX] 加入最強大的錯誤保護層，確保爬蟲不會弄垮整個伺服器
             ppi = await deep_scrape_ppi()
             if ppi is not None and SessionLocal:
                 db = SessionLocal()
@@ -162,6 +166,7 @@ async def scrape_and_save_periodically():
 @app.on_event("startup")
 async def startup_event():
     print("伺服器啟動中...")
+    # [FIX] 延遲資料庫初始化和背景任務的啟動
     await asyncio.sleep(5) 
     if initialize_database():
         print("正在排程背景爬蟲任務...")
@@ -183,11 +188,14 @@ def get_current_discount():
         ppi_threshold = settings.get("ppi_threshold", 60.0)
         conversion_factor = settings.get("conversion_factor", 0.25)
         discount_cap = settings.get("discount_cap", 25.0)
+
         start_time = datetime.utcnow() - timedelta(minutes=15)
         avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
         current_ppi = avg_ppi_query if avg_ppi_query is not None else 0.0
+
         extra_discount = max(0, (current_ppi - ppi_threshold) * conversion_factor)
         final_discount = min(base_discount + extra_discount, discount_cap)
+
         return {
             "current_ppi": round(current_ppi, 2),
             "final_discount_percentage": round(final_discount, 2),
@@ -196,11 +204,9 @@ def get_current_discount():
     finally:
         db.close()
 
-# [FIX] 還原完整的 /api/history 端點
 @app.get("/api/history")
 def get_history(timescale: str = "realtime"):
-    if SessionLocal is None:
-        return {"error": "Database not connected"}
+    if SessionLocal is None: return {"error": "Database not connected"}
     db = SessionLocal()
     try:
         if timescale == "realtime":
@@ -209,8 +215,7 @@ def get_history(timescale: str = "realtime"):
              return [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in records]
         
         interval_map = {"30m": '30 minutes', "1h": '1 hour'}
-        if timescale not in interval_map:
-             return {"error": "Invalid timescale"}
+        if timescale not in interval_map: return {"error": "Invalid timescale"}
         
         start_time_map = {"30m": datetime.utcnow() - timedelta(hours=24), "1h": datetime.utcnow() - timedelta(days=3)}
         start_time = start_time_map[timescale]
@@ -222,9 +227,6 @@ def get_history(timescale: str = "realtime"):
         ).filter(SentimentRecord.timestamp >= start_time).group_by('bucket').order_by('bucket')
         
         return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_ppi} for r in query.all()]
-    except Exception as e:
-        print(f"[錯誤] 查詢歷史數據時發生錯誤: {e}")
-        return {"error": "Could not retrieve history"}
     finally:
         db.close()
 
@@ -257,7 +259,6 @@ def get_settings():
     finally:
         db.close()
 
-# [FIX] 還原完整的 WebSocket 端點
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, request: Request):
     origin = request.headers.get('origin')
