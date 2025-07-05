@@ -1,12 +1,12 @@
 import asyncio
-import httpx  # 使用非同步 HTTP 客戶端
+import httpx
 from bs4 import BeautifulSoup
 import json
 import time
 import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, func
+from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 # --- FastAPI App & CORS ---
 app = FastAPI()
 origins = [
-    "https://projim.github.io",  # 您的 GitHub Pages 網址
+    "https://projim.github.io",
     "http://localhost",
     "http://127.0.0.1",
 ]
@@ -32,24 +32,26 @@ engine = None
 SessionLocal = None
 Base = declarative_base()
 
-class PniRecord(Base):
-    __tablename__ = "pni_records"
+class SentimentRecord(Base):
+    __tablename__ = "sentiment_records"
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    pni = Column(Float, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    ppi = Column(Float, index=True)
+
+class DiscountSetting(Base):
+    __tablename__ = "discount_settings"
+    setting_name = Column(String, primary_key=True, index=True)
+    setting_value = Column(Float)
 
 def initialize_database():
     """安全地初始化資料庫連線和表格"""
     global engine, SessionLocal
     if not DATABASE_URL:
-        print("[重大錯誤] 找不到環境變數 DATABASE_URL。請在 Render 上設定。")
+        print("[重大錯誤] 找不到環境變數 DATABASE_URL。")
         return False
     
-    db_url_for_sqlalchemy = DATABASE_URL
-    if DATABASE_URL.startswith("postgres://"):
-        db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    
-    print(f"[偵錯] 正在嘗試使用以下 URL 連接資料庫...")
+    db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    print(f"[偵錯] 正在嘗試連接資料庫...")
 
     try:
         engine = create_engine(db_url_for_sqlalchemy)
@@ -61,19 +63,39 @@ def initialize_database():
         print("正在檢查並創建資料庫表格...")
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
+        
+        # 初始化預設折扣設定 (如果不存在)
+        db = SessionLocal()
+        try:
+            default_settings = {
+                "base_discount": 5.0,
+                "ppi_threshold": 60.0,
+                "conversion_factor": 0.25,
+                "discount_cap": 25.0
+            }
+            for key, value in default_settings.items():
+                existing_setting = db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).first()
+                if not existing_setting:
+                    new_setting = DiscountSetting(setting_name=key, setting_value=value)
+                    db.add(new_setting)
+                    print(f"已初始化預設折扣設定: {key} = {value}")
+            db.commit()
+        finally:
+            db.close()
+
         return True
     except Exception as e:
         print(f"[重大錯誤] 資料庫初始化失敗: {e}")
         return False
 
-# --- PTT Scraper (Async Deep Scrape Logic) ---
+# --- PTT Scraper Logic ---
 PTT_URL = "https://www.ptt.cc"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
 cookies = {"over18": "1"}
 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
-async def deep_scrape_pni():
-    """非同步深度分析：進入每篇文章內頁，精準計算 PNI。"""
+async def deep_scrape_ppi():
+    """非同步深度分析：進入每篇文章內頁，精準計算 PPI。"""
     try:
         async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=30) as client:
             response = await client.get(GOSSIPING_BOARD_URL)
@@ -89,13 +111,13 @@ async def deep_scrape_pni():
             total_boo = sum(r[1] for r in results)
 
             total_votes = total_push + total_boo
-            pni = (total_boo / total_votes) * 100 if total_votes > 0 else 0
+            ppi = (total_push / total_votes) * 100 if total_votes > 0 else 0
             
             print(f"--- 深度分析完成 ---")
-            print(f"總推文: {total_push}, 總噓文: {total_boo}, PNI: {pni:.2f}%")
+            print(f"總推文: {total_push}, 總噓文: {total_boo}, PPI: {ppi:.2f}%")
             print(f"--------------------")
             
-            return pni
+            return ppi
     except Exception as e:
         print(f"[錯誤] 爬取列表頁失敗: {e}")
         return None
@@ -113,44 +135,28 @@ async def scrape_article(client: httpx.AsyncClient, url: str):
         print(f"[警告] 爬取內頁 {url} 失敗: {e}")
         return 0, 0
 
-# --- WebSocket & Background Task ---
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        print(f"新的客戶端連接: {websocket.client.host}")
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        print(f"客戶端斷開連接: {websocket.client.host}")
-    async def broadcast(self, message: str):
-        await asyncio.gather(*[connection.send_text(message) for connection in self.active_connections])
-
-manager = ConnectionManager()
-
+# --- Background Task ---
 async def scrape_and_save_periodically():
     while SessionLocal is None:
         print("等待資料庫初始化...")
         await asyncio.sleep(5)
 
     while True:
-        pni = await deep_scrape_pni()
-        if pni is not None:
+        ppi = await deep_scrape_ppi()
+        if ppi is not None:
             db = SessionLocal()
             try:
-                new_record = PniRecord(pni=pni)
+                new_record = SentimentRecord(ppi=ppi)
                 db.add(new_record)
                 db.commit()
-                print(f"PNI {pni:.2f}% 已成功存入資料庫。")
-                message = json.dumps({"type": "pni_update", "timestamp": time.time(), "pni": pni})
-                await manager.broadcast(message)
+                print(f"PPI {ppi:.2f}% 已成功存入資料庫。")
             except SQLAlchemyError as e:
                 print(f"[錯誤] 寫入資料庫失敗: {e}")
                 db.rollback()
             finally:
                 db.close()
-        await asyncio.sleep(180)
+        
+        await asyncio.sleep(180) # 每 3 分鐘執行一次深度爬取
 
 # --- API Endpoints & Startup Event ---
 @app.on_event("startup")
@@ -165,47 +171,48 @@ async def startup_event():
 
 @app.get("/")
 def read_root():
-    return {"status": "PTT Scraper API is alive"}
+    return {"status": "PTT Discount Engine API is alive"}
 
-@app.get("/api/history")
-def get_history(timescale: str = "realtime"):
+@app.get("/api/current-discount")
+def get_current_discount():
     if SessionLocal is None:
-        return {"error": "Database not connected"}
+        return {"error": "Database not connected", "discount": 0}
+    
     db = SessionLocal()
     try:
-        if timescale == "realtime":
-             start_time = datetime.utcnow() - timedelta(hours=1)
-             records = db.query(PniRecord).filter(PniRecord.timestamp >= start_time).order_by(PniRecord.timestamp.desc()).limit(60).all()
-             return [{"timestamp": r.timestamp.isoformat() + "Z", "pni": r.pni} for r in reversed(records)]
-        elif timescale == "30m":
-            start_time = datetime.utcnow() - timedelta(hours=24)
-            interval = '30 minutes'
-        elif timescale == "1h":
-            start_time = datetime.utcnow() - timedelta(days=3)
-            interval = '1 hour'
-        else:
-            return {"error": "Invalid timescale"}
-
-        query = db.query(
-            func.date_trunc(interval, PniRecord.timestamp).label('bucket'),
-            func.avg(PniRecord.pni).label('avg_pni')
-        ).filter(
-            PniRecord.timestamp >= start_time
-        ).group_by('bucket').order_by('bucket')
+        # 1. 讀取折扣設定
+        settings_query = db.query(DiscountSetting).all()
+        settings = {s.setting_name: s.setting_value for s in settings_query}
         
-        results = query.all()
-        return [{"timestamp": r.bucket.isoformat() + "Z", "pni": r.avg_pni} for r in results]
+        base_discount = settings.get("base_discount", 5.0)
+        ppi_threshold = settings.get("ppi_threshold", 60.0)
+        conversion_factor = settings.get("conversion_factor", 0.25)
+        discount_cap = settings.get("discount_cap", 25.0)
+
+        # 2. 計算過去 15 分鐘的滾動平均 PPI
+        start_time = datetime.utcnow() - timedelta(minutes=15)
+        avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
+        
+        current_ppi = avg_ppi_query if avg_ppi_query is not None else 0
+
+        # 3. 執行公式
+        extra_discount = 0
+        if current_ppi > ppi_threshold:
+            extra_discount = (current_ppi - ppi_threshold) * conversion_factor
+        
+        final_discount = base_discount + extra_discount
+        
+        # 4. 套用上限
+        final_discount = min(final_discount, discount_cap)
+
+        return {
+            "current_ppi": round(current_ppi, 2),
+            "final_discount_percentage": round(final_discount, 2),
+            "settings": settings
+        }
+
     except Exception as e:
-        print(f"[錯誤] 查詢歷史數據時發生錯誤: {e}")
-        return {"error": "Could not retrieve history"}
+        print(f"[錯誤] 計算折扣時發生錯誤: {e}")
+        return {"error": "Could not calculate discount", "discount": 0}
     finally:
         db.close()
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
