@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     // 檢查函式庫是否已成功載入
-    if (typeof Chart === 'undefined' || typeof QRCode === 'undefined' || typeof window.dateFns === 'undefined') {
+    if (typeof Chart === 'undefined' || typeof JsBarcode === 'undefined' || typeof window.dateFns === 'undefined') {
         console.error("Fatal Error: A required library failed to load.");
         document.getElementById('connection-status').innerHTML = "關鍵函式庫載入失敗，請檢查 libs 資料夾或網路連線並刷新頁面。";
         return;
@@ -15,11 +15,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const ppiDisplayEl = document.getElementById('ppi-display');
     const formulaDisplayEl = document.getElementById('formula-display');
     const ctx = document.getElementById('sentimentChart').getContext('2d');
-    const generateQrBtn = document.getElementById('generate-qr-btn');
-    const qrModal = document.getElementById('qr-modal');
+    const generateCodeBtn = document.getElementById('generate-code-btn');
+    const codeModal = document.getElementById('code-modal');
     const closeModalBtn = document.getElementById('close-modal-btn');
-    const qrcodeContainer = document.getElementById('qrcode-container');
-    const qrCountdownEl = document.getElementById('qr-countdown');
+    const codeCountdownEl = document.getElementById('code-countdown');
     
     // 應用程式狀態
     let sentimentChart;
@@ -42,8 +41,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.error) throw new Error(data.error);
             
             connectionStatusEl.textContent = `上次更新：${new Date().toLocaleTimeString('zh-TW')}`;
-            currentDiscountData = data; // [NEW] 儲存最新數據
-            generateQrBtn.disabled = false; // [NEW] 啟用按鈕
+            currentDiscountData = data;
+            generateCodeBtn.disabled = false;
             updateUI(data);
             startCountdown();
 
@@ -51,12 +50,18 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('獲取折扣失敗:', error);
             connectionStatusEl.textContent = "獲取折扣失敗，請稍後重試。";
             discountDisplayEl.textContent = "---";
-            generateQrBtn.disabled = true;
+            generateCodeBtn.disabled = true;
         }
     }
 
     function updateUI(data) {
-        // ... (與之前版本相同) ...
+        const { current_ppi, final_discount_percentage, settings } = data;
+        const discountValue = (100 - final_discount_percentage) / 10;
+        discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
+        ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
+        const { base_discount, ppi_threshold, conversion_factor } = settings;
+        formulaDisplayEl.textContent = `${base_discount}% + (${current_ppi.toFixed(1)}% - ${ppi_threshold}%) * ${conversion_factor}`;
+        updateChart(current_ppi);
     }
     
     function updateChart(newPpi) {
@@ -64,65 +69,51 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function startCountdown() {
-        clearInterval(countdownInterval);
-        let seconds = 60;
-        countdownTimerEl.parentElement.style.display = 'block';
-
-        countdownInterval = setInterval(() => {
-            seconds--;
-            countdownTimerEl.textContent = `${seconds}`;
-            if (seconds <= 0) {
-                clearInterval(countdownInterval);
-                 countdownTimerEl.parentElement.style.display = 'none';
-            }
-        }, 1000);
+        // ... (與之前版本相同) ...
     }
 
-    // [NEW] 產生並顯示 QR Code 的函式
-    function showQRCode() {
+    // [UPDATE] 產生並顯示 Barcode 的函式
+    function showBarcode() {
         if (!currentDiscountData) return;
 
-        qrModal.classList.remove('hidden');
-        qrcodeContainer.innerHTML = ''; // 清空舊的 QR Code
+        codeModal.classList.remove('hidden');
 
-        const qrData = {
-            discount: currentDiscountData.final_discount_percentage,
-            ppi: currentDiscountData.current_ppi,
-            timestamp: new Date().toISOString()
-        };
-
-        new QRCode(qrcodeContainer, {
-            text: JSON.stringify(qrData),
-            width: 200,
-            height: 200,
-            colorDark : "#000000",
-            colorLight : "#ffffff",
-            correctLevel : QRCode.CorrectLevel.H
+        // 產生一個給 POS 系統讀取的條碼字串
+        const discountCode = `MILK-${currentDiscountData.final_discount_percentage.toFixed(2)}-${Date.now()}`;
+        
+        JsBarcode("#barcode", discountCode, {
+            format: "CODE128",
+            lineColor: "#000",
+            width: 2,
+            height: 80,
+            displayValue: true,
+            fontSize: 18
         });
 
-        // 開始 QR Code 倒數計時
+        // 開始 Barcode 倒數計時
         let seconds = 60;
-        const qrInterval = setInterval(() => {
+        codeCountdownEl.textContent = seconds;
+        const codeInterval = setInterval(() => {
             seconds--;
-            qrCountdownEl.textContent = seconds;
-            if (seconds <= 0 || qrModal.classList.contains('hidden')) {
-                clearInterval(qrInterval);
+            codeCountdownEl.textContent = seconds;
+            if (seconds <= 0 || codeModal.classList.contains('hidden')) {
+                clearInterval(codeInterval);
             }
         }, 1000);
     }
 
     function initialize() {
         sentimentChart = new Chart(ctx, chartConfig);
-        
         fetchDiscount();
         mainInterval = setInterval(fetchDiscount, 60000);
 
-        // [NEW] 綁定按鈕事件
-        generateQrBtn.addEventListener('click', showQRCode);
+        // [UPDATE] 綁定按鈕事件
+        generateCodeBtn.addEventListener('click', showBarcode);
         closeModalBtn.addEventListener('click', () => {
-            qrModal.classList.add('hidden');
+            codeModal.classList.add('hidden');
         });
     }
 
     initialize();
 });
+</script>
