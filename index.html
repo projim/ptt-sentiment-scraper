@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>福樂指數---即時折扣</title>
+    <title>鄉民公道價：牛奶即時折扣</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
@@ -15,16 +15,16 @@
     <script src="./libs/chart.min.js" defer></script>
     <script src="./libs/date-fns.min.js" defer></script>
     <script src="./libs/chartjs-adapter-date-fns.bundle.min.js" defer></script>
-    <!-- [NEW] 新增 QR Code 生成函式庫 -->
-    <script src="./libs/qrcode.min.js" defer></script>
+    <!-- [UPDATE] 改為載入新的 Barcode 函式庫 -->
+    <script src="./libs/JsBarcode.all.min.js" defer></script>
     <script src="./app.js" defer></script>
 </head>
 <body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-4">
 
     <div class="w-full max-w-2xl bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 text-center">
         
-        <h1 class="text-3xl md:text-4xl font-bold text-white">福樂指數</h1>
-        <p class="text-indigo-400 mt-2">福樂的價格 由大家的心情來決定！</p>
+        <h1 class="text-3xl md:text-4xl font-bold text-white">鄉民公道價：牛奶即時折扣</h1>
+        <p class="text-indigo-400 mt-2">PTT 八卦版正向情緒，即時決定您的牛奶折扣！</p>
         <div id="connection-status" class="mt-4 text-sm text-yellow-400">正在連接伺服器...</div>
 
         <div class="my-8 p-8 bg-gray-900 rounded-2xl border border-indigo-500/30">
@@ -35,9 +35,8 @@
             </div>
         </div>
 
-        <!-- [NEW] 新增 "產生折扣碼" 按鈕 -->
-        <button id="generate-qr-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 text-lg disabled:bg-gray-500 disabled:cursor-not-allowed" disabled>
-            產生折扣碼
+        <button id="generate-code-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 text-lg disabled:bg-gray-500 disabled:cursor-not-allowed" disabled>
+            產生結帳條碼
         </button>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-left mt-6">
@@ -59,15 +58,16 @@
         </div>
     </div>
 
-    <!-- [NEW] QR Code 彈出視窗 (Modal) -->
-    <div id="qr-modal" class="fixed inset-0 modal-backdrop flex items-center justify-center p-4 hidden z-50">
+    <!-- [UPDATE] Barcode 彈出視窗 (Modal) -->
+    <div id="code-modal" class="fixed inset-0 modal-backdrop flex items-center justify-center p-4 hidden z-50">
         <div class="bg-white rounded-2xl p-8 text-center text-gray-800 max-w-sm w-full">
-            <h2 class="text-2xl font-bold mb-2">即時折扣碼</h2>
-            <p class="text-gray-600 mb-4">請於結帳時出示此 QR Code<br>此折扣碼每分鐘更新</p>
-            <div id="qrcode-container" class="flex justify-center items-center p-4 bg-gray-100 rounded-lg">
-                <!-- QR Code 將會被繪製在這裡 -->
+            <h2 class="text-2xl font-bold mb-2">即時結帳條碼</h2>
+            <p class="text-gray-600 mb-4">請於結帳時出示此條碼<br>此條碼每分鐘更新</p>
+            <div id="barcode-container" class="flex justify-center items-center p-4 bg-white rounded-lg">
+                <!-- Barcode 將會被繪製在這裡 -->
+                <svg id="barcode"></svg>
             </div>
-            <p class="text-sm text-gray-500 mt-4">折扣碼將於 <span id="qr-countdown" class="font-bold">60</span> 秒後失效</p>
+            <p class="text-sm text-gray-500 mt-4">條碼將於 <span id="code-countdown" class="font-bold">60</span> 秒後失效</p>
             <button id="close-modal-btn" class="mt-6 w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg">
                 關閉
             </button>
