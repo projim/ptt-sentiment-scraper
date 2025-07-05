@@ -6,7 +6,7 @@ import time
 import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String
+from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
