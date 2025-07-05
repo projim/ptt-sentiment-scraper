@@ -15,7 +15,6 @@
     <script src="./libs/chart.min.js" defer></script>
     <script src="./libs/date-fns.min.js" defer></script>
     <script src="./libs/chartjs-adapter-date-fns.bundle.min.js" defer></script>
-    <!-- [UPDATE] 改為載入新的 Barcode 函式庫 -->
     <script src="./libs/JsBarcode.all.min.js" defer></script>
     <script src="./app.js" defer></script>
 </head>
@@ -58,13 +57,11 @@
         </div>
     </div>
 
-    <!-- [UPDATE] Barcode 彈出視窗 (Modal) -->
     <div id="code-modal" class="fixed inset-0 modal-backdrop flex items-center justify-center p-4 hidden z-50">
         <div class="bg-white rounded-2xl p-8 text-center text-gray-800 max-w-sm w-full">
             <h2 class="text-2xl font-bold mb-2">即時結帳條碼</h2>
             <p class="text-gray-600 mb-4">請於結帳時出示此條碼<br>此條碼每分鐘更新</p>
             <div id="barcode-container" class="flex justify-center items-center p-4 bg-white rounded-lg">
-                <!-- Barcode 將會被繪製在這裡 -->
                 <svg id="barcode"></svg>
             </div>
             <p class="text-sm text-gray-500 mt-4">條碼將於 <span id="code-countdown" class="font-bold">60</span> 秒後失效</p>
