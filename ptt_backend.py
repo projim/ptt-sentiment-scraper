@@ -4,16 +4,24 @@ from bs4 import BeautifulSoup
 import json
 import time
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
+from pydantic import BaseModel
+
+# --- Pydantic Models for Data Validation ---
+class SettingsUpdate(BaseModel):
+    base_discount: float
+    ppi_threshold: float
+    conversion_factor: float
+    secret_key: str
 
 # --- FastAPI App & CORS ---
 app = FastAPI()
-origins = ["*"] # 允許所有來源，以解決 WebSocket 的 403 Forbidden 問題
+origins = ["*"] # 允許所有來源，以解決 WebSocket 和 API 的跨來源問題
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -24,6 +32,7 @@ app.add_middleware(
 
 # --- Database Setup ---
 DATABASE_URL = os.environ.get('DATABASE_URL')
+ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
 engine = None
 SessionLocal = None
 Base = declarative_base()
@@ -55,7 +64,6 @@ def initialize_database():
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
 
-        # 初始化預設折扣設定
         db = SessionLocal()
         try:
             default_settings = {
@@ -66,6 +74,7 @@ def initialize_database():
                 if not db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).first():
                     db.add(DiscountSetting(setting_name=key, setting_value=value))
             db.commit()
+            print("預設折扣設定已確認。")
         finally:
             db.close()
         return True
@@ -111,20 +120,7 @@ async def scrape_article(client: httpx.AsyncClient, url: str):
         print(f"[警告] 爬取內頁 {url} 失敗: {e}")
         return 0, 0
 
-# --- WebSocket & Background Task ---
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-    async def broadcast(self, message: str):
-        await asyncio.gather(*[connection.send_text(message) for connection in self.active_connections])
-
-manager = ConnectionManager()
-
+# --- Background Task ---
 async def scrape_and_save_periodically():
     print("背景任務已排程，將在 15 秒後開始第一次爬取...")
     await asyncio.sleep(15)
@@ -138,8 +134,6 @@ async def scrape_and_save_periodically():
                     db.add(new_record)
                     db.commit()
                     print(f"PPI {ppi:.2f}% 已成功存入資料庫。")
-                    message = json.dumps({"type": "ppi_update", "timestamp": time.time(), "ppi": ppi})
-                    await manager.broadcast(message)
                 finally:
                     db.close()
         except Exception as e:
@@ -160,7 +154,7 @@ async def startup_event():
 
 @app.get("/")
 def read_root():
-    return {"status": "PTT Scraper API is alive"}
+    return {"status": "PTT Discount Engine API is alive"}
 
 @app.get("/api/current-discount")
 def get_current_discount():
@@ -189,37 +183,35 @@ def get_current_discount():
     finally:
         db.close()
 
-@app.get("/api/history")
-def get_history(timescale: str = "realtime"):
-    if SessionLocal is None: return {"error": "Database not connected"}
+@app.post("/api/update-settings")
+def update_settings(payload: SettingsUpdate):
+    if payload.secret_key != ADMIN_SECRET_KEY:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="無效的管理員密碼")
+    if SessionLocal is None: raise HTTPException(status_code=503, detail="資料庫未連接")
     db = SessionLocal()
     try:
-        if timescale == "realtime":
-             start_time = datetime.utcnow() - timedelta(hours=1)
-             records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= start_time).order_by(SentimentRecord.timestamp.asc()).all()
-             return [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in records]
-        
-        interval_map = {"30m": '30 minutes', "1h": '1 hour'}
-        if timescale not in interval_map: return {"error": "Invalid timescale"}
-        
-        start_time_map = {"30m": datetime.utcnow() - timedelta(hours=24), "1h": datetime.utcnow() - timedelta(days=3)}
-        start_time = start_time_map[timescale]
-        interval = interval_map[timescale]
-
-        query = db.query(
-            func.date_trunc(interval, SentimentRecord.timestamp).label('bucket'),
-            func.avg(SentimentRecord.ppi).label('avg_ppi')
-        ).filter(SentimentRecord.timestamp >= start_time).group_by('bucket').order_by('bucket')
-        
-        return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_ppi} for r in query.all()]
+        settings_to_update = {
+            "base_discount": payload.base_discount,
+            "ppi_threshold": payload.ppi_threshold,
+            "conversion_factor": payload.conversion_factor,
+        }
+        for key, value in settings_to_update.items():
+            db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).update({"setting_value": value})
+        db.commit()
+        print(f"[後台管理] 折扣設定已更新: {settings_to_update}")
+        return {"message": "折扣設定已成功更新！"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"更新設定時發生內部錯誤: {e}")
     finally:
         db.close()
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+@app.get("/api/get-settings")
+def get_settings():
+    if SessionLocal is None: return {"error": "Database not connected"}
+    db = SessionLocal()
     try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        settings_query = db.query(DiscountSetting).all()
+        return {s.setting_name: s.setting_value for s in settings_query}
+    finally:
+        db.close()
