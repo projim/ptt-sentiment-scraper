@@ -91,43 +91,46 @@ def initialize_database():
         return False
 
 # --- PTT Scraper Logic ---
-# [UPDATE] 將目標網址還原為 www.ptt.cc
 PTT_URL = "https://www.ptt.cc"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
 cookies = {"over18": "1"}
 
+# [UPDATE] 建立一個 User-Agent 池，模擬不同的瀏覽器
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0"
 ]
 
 async def deep_scrape_ppi():
     """非同步深度分析：進入每篇文章內頁，精準計算 PPI。"""
+    # [UPDATE] 每次爬取都隨機選擇一個 User-Agent，並加入更豐富的標頭
     headers = {
         'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
         'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://www.ptt.cc/bbs/Gossiping/index.html',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0',
     }
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=40) as client:
                 print(f"[偵錯] 正在使用 User-Agent: {headers['User-Agent']}")
                 response = await client.get(GOSSIPING_BOARD_URL)
-                response.raise_for_status()
+                response.raise_for_status() # 如果狀態碼不是 2xx，會拋出錯誤
                 
                 soup = BeautifulSoup(response.text, "html.parser")
-                # [FIX] 將 CSS 選擇器還原為適用於 www.ptt.cc 的 'div.r-ent'
                 articles = soup.select("div.r-ent")
                 
-                article_urls = []
-                for article in articles:
-                    # [FIX] 還原獲取連結的邏輯
-                    link_tag = article.select_one("div.title a")
-                    if link_tag and link_tag.has_attr('href'):
-                        article_urls.append(PTT_URL + link_tag['href'])
+                article_urls = [PTT_URL + a.find('a')['href'] for a in articles if a.find('a') and 'M.' in a.find('a')['href']]
 
                 if not article_urls:
-                    print("[警告] 在列表頁上沒有找到任何文章連結。")
+                    print("[警告] 在列表頁上沒有找到任何文章連結。可能是頁面結構改變或被阻擋。")
                     return 0.0
 
                 scrape_tasks = [scrape_article(client, url) for url in article_urls]
@@ -141,9 +144,12 @@ async def deep_scrape_ppi():
                 print(f"--- 深度分析完成 (第 {attempt + 1} 次嘗試) --- PPI: {ppi:.2f}%")
                 return ppi
         except httpx.HTTPStatusError as e:
-            print(f"[錯誤] HTTP 狀態錯誤: {e.response.status_code} - {e}")
-            if attempt < max_retries - 1: await asyncio.sleep(5)
-            else: return None
+            print(f"[錯誤] HTTP 狀態錯誤 (可能是 403/404/5xx): {e.response.status_code} - {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(random.uniform(5, 10)) # 增加隨機延遲後重試
+            else:
+                print("[錯誤] 達到最大重試次數，放棄本次爬取。")
+                return None
         except Exception as e:
             print(f"[錯誤] 爬取列表頁時發生未知錯誤: {e}")
             return None
@@ -151,11 +157,10 @@ async def deep_scrape_ppi():
 
 async def scrape_article(client: httpx.AsyncClient, url: str):
     try:
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(random.uniform(0.3, 0.8)) # 稍微增加隨機延遲
         article_res = await client.get(url, timeout=20)
         article_res.raise_for_status()
         article_soup = BeautifulSoup(article_res.text, 'html.parser')
-        # www.ptt.cc 的留言選擇器，這個是正確的
         pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
         boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
         return len(pushes), len(boos)
