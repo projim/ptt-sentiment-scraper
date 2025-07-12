@@ -1,7 +1,9 @@
 fastapi
 uvicorn[standard]
+websockets
 httpx
 beautifulsoup4
 SQLAlchemy
 psycopg2-binary
 pydantic
+playwright
