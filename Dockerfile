@@ -1,5 +1,5 @@
-# 使用由微軟 Playwright 團隊官方維護的、已內建所有工具的映像檔
-FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+# [UPDATE] 將基礎映像檔升級到您指定的 v1.53.0 版本
+FROM mcr.microsoft.com/playwright/python:v1.53.0-jammy
 
 # 設定伺服器內部的工作目錄
 WORKDIR /app
