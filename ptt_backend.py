@@ -91,7 +91,6 @@ def initialize_database():
         return False
 
 # --- PTT Scraper Logic ---
-# [UPDATE] 目標網址已更新
 PTT_URL = "https://ptt-discussion.tw"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
 cookies = {"over18": "1"}
@@ -119,13 +118,12 @@ async def deep_scrape_ppi():
                 
                 soup = BeautifulSoup(response.text, "html.parser")
                 # [FIX] 更新了文章列表的 CSS 選擇器以匹配新網站
-                articles = soup.select("div.list-post-item")
+                articles = soup.select("a.list-post-item")
                 
                 article_urls = []
-                for article in articles:
-                    link_tag = article.select_one("div.list-post-title a")
-                    if link_tag and link_tag.has_attr('href'):
-                        article_urls.append(PTT_URL + link_tag['href'])
+                for article_link in articles:
+                    if article_link.has_attr('href'):
+                        article_urls.append(PTT_URL + article_link['href'])
 
                 if not article_urls:
                     print("[警告] 在列表頁上沒有找到任何文章連結。")
