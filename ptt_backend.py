@@ -207,7 +207,6 @@ async def startup_event():
 def read_root():
     return {"status": "PTT Discount Engine API is alive"}
 
-# ... (所有 API 端點，如 /api/current-discount, /api/history 等，都保持不變) ...
 @app.get("/api/current-discount")
 def get_current_discount():
     if not db_ready or SessionLocal is None:
