@@ -194,8 +194,8 @@ def get_current_discount():
         settings_query = db.query(DiscountSetting).all()
         settings = {s.setting_name: s.setting_value for s in settings_query}
         base_discount = settings.get("base_discount", 5.0)
-        ppi_threshold = settings.get("ppi_threshold", 60.0)
-        conversion_factor = settings.get("conversion_factor", 0.25)
+        ppi_threshold = settings.get("ppi_threshold", 70.0)
+        conversion_factor = settings.get("conversion_factor", 0.5)
         discount_cap = settings.get("discount_cap", 25.0)
 
         start_time = datetime.utcnow() - timedelta(minutes=15)
@@ -213,9 +213,12 @@ def get_current_discount():
                 print("[API] 資料庫中無任何有效歷史數據，PPI 將使用 0。")
 
         extra_discount = 0
-        if current_ppi > ppi_threshold:
-            extra_discount = (current_ppi - ppi_threshold) * conversion_factor
-        
+       # if current_ppi > ppi_threshold:
+       #     extra_discount = (current_ppi - ppi_threshold) * conversion_factor
+        if current_ppi < ppi_threshold:
+            # PPI 越低，(ppi_threshold - current_ppi) 的值越大，額外折扣就越高
+            extra_discount = (ppi_threshold - current_ppi) * conversion_factor
+            
         final_discount = base_discount + extra_discount
         final_discount = min(final_discount, discount_cap)
         print(f"[API] 計算出的最終折扣百分比: {final_discount}")
