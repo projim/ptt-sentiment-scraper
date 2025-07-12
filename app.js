@@ -102,10 +102,10 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     function calculateDiscountFromPpi(ppi, settings) {
-        const { base_discount = 5.0, ppi_threshold = 60.0, conversion_factor = 0.25, discount_cap = 25.0 } = settings;
+        const { base_discount = 5.0, ppi_threshold = 70.0, conversion_factor = 0.5, discount_cap = 25.0 } = settings;
         let extra_discount = 0;
-        if (ppi > ppi_threshold) {
-            extra_discount = (ppi - ppi_threshold) * conversion_factor;
+        if (ppi < ppi_threshold) {
+            extra_discount = (ppi_threshold - ppi) * conversion_factor;
         }
         const final_discount = Math.min(base_discount + extra_discount, discount_cap);
         return final_discount;
