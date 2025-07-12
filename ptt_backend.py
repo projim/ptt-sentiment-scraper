@@ -4,7 +4,8 @@ from bs4 import BeautifulSoup
 import json
 import time
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import random # [NEW] 引入隨機函式庫
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String, func
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -37,7 +38,7 @@ ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
 engine = None
 SessionLocal = None
 Base = declarative_base()
-db_ready = False # A simple flag to check DB status
+db_ready = False
 
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
@@ -69,8 +70,10 @@ def initialize_database():
         db = SessionLocal()
         try:
             default_settings = {
-                "base_discount": 5.0, "ppi_threshold": 60.0,
-                "conversion_factor": 0.25, "discount_cap": 25.0
+                "base_discount": 5.0, 
+                "ppi_threshold": 70.0,
+                "conversion_factor": 0.5,
+                "discount_cap": 25.0
             }
             for key, value in default_settings.items():
                 if not db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).first():
@@ -88,35 +91,71 @@ def initialize_database():
         return False
 
 # --- PTT Scraper Logic ---
-PTT_URL = "https://www.ptt.cc"
+PTT_URL = "https://ptt-discussion.tw"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
 cookies = {"over18": "1"}
-headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+
+# [NEW] 建立一個 User-Agent 池，模擬不同的瀏覽器
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
+]
 
 async def deep_scrape_ppi():
-    try:
-        async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=40) as client:
-            response = await client.get(GOSSIPING_BOARD_URL)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            articles = soup.find_all("div", class_="r-ent")
-            article_urls = [PTT_URL + a.find('a')['href'] for a in articles if a.find('a') and 'M.' in a.find('a')['href']]
-            scrape_tasks = [scrape_article(client, url) for url in article_urls]
-            results = await asyncio.gather(*scrape_tasks)
-            total_push = sum(r[0] for r in results)
-            total_boo = sum(r[1] for r in results)
-            total_votes = total_push + total_boo
-            ppi = (total_push / total_votes) * 100 if total_votes > 0 else 0
-            print(f"--- 深度分析完成 --- PPI: {ppi:.2f}%")
-            return ppi
-    except Exception as e:
-        print(f"[錯誤] 爬取列表頁失敗: {e}")
-        return None
+    """非同步深度分析：進入每篇文章內頁，精準計算 PPI。"""
+    # [UPDATE] 每次爬取都隨機選擇一個 User-Agent，並加入更豐富的標頭
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Connection': 'keep-alive'
+    }
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=40) as client:
+                print(f"[偵錯] 正在使用 User-Agent: {headers['User-Agent']}")
+                response = await client.get(GOSSIPING_BOARD_URL)
+                response.raise_for_status() # 如果狀態碼不是 2xx，會拋出錯誤
+                
+                soup = BeautifulSoup(response.text, "html.parser")
+                articles = soup.find_all("div", class_="r-ent")
+                article_urls = [PTT_URL + a.find('a')['href'] for a in articles if a.find('a') and 'M.' in a.find('a')['href']]
+                
+                if not article_urls:
+                    print("[警告] 在列表頁上沒有找到任何文章連結。")
+                    return 0.0
+
+                scrape_tasks = [scrape_article(client, url) for url in article_urls]
+                results = await asyncio.gather(*scrape_tasks)
+                
+                total_push = sum(r[0] for r in results)
+                total_boo = sum(r[1] for r in results)
+                total_votes = total_push + total_boo
+                ppi = (total_push / total_votes) * 100 if total_votes > 0 else 0
+                
+                print(f"--- 深度分析完成 (第 {attempt + 1} 次嘗試) --- PPI: {ppi:.2f}%")
+                return ppi
+        except httpx.HTTPStatusError as e:
+            print(f"[錯誤] HTTP 狀態錯誤 (可能是 403/404/5xx): {e.response.status_code} - {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(5)
+            else:
+                print("[錯誤] 達到最大重試次數，放棄本次爬取。")
+                return None
+        except Exception as e:
+            print(f"[錯誤] 爬取列表頁時發生未知錯誤: {e}")
+            return None
+    return None
 
 async def scrape_article(client: httpx.AsyncClient, url: str):
     try:
-        await asyncio.sleep(0.25)
-        article_res = await client.get(url, timeout=15)
+        await asyncio.sleep(0.3) # 稍微增加延遲
+        article_res = await client.get(url, timeout=20)
         article_soup = BeautifulSoup(article_res.text, 'html.parser')
         pushes = article_soup.find_all('span', class_='push-tag', string=lambda text: '推' in text)
         boos = article_soup.find_all('span', class_='push-tag', string=lambda text: '噓' in text)
@@ -126,6 +165,7 @@ async def scrape_article(client: httpx.AsyncClient, url: str):
         return 0, 0
 
 # --- WebSocket & Background Task ---
+# ... (此部分邏輯與之前版本相同) ...
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
@@ -173,6 +213,7 @@ async def scrape_and_save_periodically():
         await asyncio.sleep(180)
 
 # --- API Endpoints & Startup Event ---
+# ... (此部分邏輯與之前版本相同) ...
 @app.on_event("startup")
 async def startup_event():
     print("伺服器啟動中...")
@@ -193,6 +234,7 @@ def get_current_discount():
     try:
         settings_query = db.query(DiscountSetting).all()
         settings = {s.setting_name: s.setting_value for s in settings_query}
+        
         base_discount = settings.get("base_discount", 5.0)
         ppi_threshold = settings.get("ppi_threshold", 70.0)
         conversion_factor = settings.get("conversion_factor", 0.5)
@@ -200,28 +242,20 @@ def get_current_discount():
 
         start_time = datetime.utcnow() - timedelta(minutes=15)
         avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
+        
         current_ppi = avg_ppi_query if avg_ppi_query is not None else 0.0
 
-        # [NEW] 數據回溯機制
         if current_ppi == 0.0:
-            print("[API] 15分鐘內無數據，正在嘗試回溯最後一筆有效PPI...")
             last_valid_ppi_record = db.query(SentimentRecord.ppi).filter(SentimentRecord.ppi > 0).order_by(SentimentRecord.timestamp.desc()).first()
             if last_valid_ppi_record:
-                current_ppi = last_valid_ppi_record[0] # The result is a tuple
-                print(f"[API] 已成功回溯，使用最後一筆有效PPI: {current_ppi:.2f}%")
-            else:
-                print("[API] 資料庫中無任何有效歷史數據，PPI 將使用 0。")
+                current_ppi = last_valid_ppi_record[0]
 
         extra_discount = 0
-       # if current_ppi > ppi_threshold:
-       #     extra_discount = (current_ppi - ppi_threshold) * conversion_factor
         if current_ppi < ppi_threshold:
-            # PPI 越低，(ppi_threshold - current_ppi) 的值越大，額外折扣就越高
             extra_discount = (ppi_threshold - current_ppi) * conversion_factor
-            
+        
         final_discount = base_discount + extra_discount
         final_discount = min(final_discount, discount_cap)
-        print(f"[API] 計算出的最終折扣百分比: {final_discount}")
 
         return {
             "current_ppi": round(current_ppi, 2),
@@ -255,10 +289,10 @@ def get_history(timescale: str = "realtime"):
 
         query = db.query(
             func.date_trunc(interval, SentimentRecord.timestamp).label('bucket'),
-            func.avg(SentimentRecord.ppi).label('avg_ppi')
+            func.avg(SentimentRecord.ppi).label('avg_pni')
         ).filter(SentimentRecord.timestamp >= start_time).group_by('bucket').order_by('bucket')
         
-        return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_ppi} for r in query.all()]
+        return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_pni} for r in query.all()]
     finally:
         db.close()
 
@@ -298,9 +332,6 @@ def get_settings():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """[FIX] 修正函式定義，移除錯誤的 request 參數"""
-    origin = websocket.headers.get('origin')
-    print(f"WebSocket 連線請求來自: {origin}")
     await manager.connect(websocket)
     try:
         while True:
