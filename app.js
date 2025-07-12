@@ -169,7 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateUIDisplay(data) {
         const { current_ppi, final_discount_percentage, settings } = data;
-        const discountValue = (/*100 - */final_discount_percentage) / 10;
+        const discountValue = (/*100 - final_discount_percentage*/formulaDisplayEl) / 10;
         discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
         ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
         const { base_discount, ppi_threshold, conversion_factor } = settings;
