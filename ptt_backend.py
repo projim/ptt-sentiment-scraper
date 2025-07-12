@@ -88,7 +88,7 @@ def initialize_database():
         return False
 
 # --- PTT Scraper Logic ---
-PTT_URL = "https://www.ptt.cc"
+PTT_URL = "https://ptt-discussion.tw"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
 cookies = {"over18": "1"}
 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
