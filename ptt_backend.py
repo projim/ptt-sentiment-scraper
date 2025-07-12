@@ -91,15 +91,14 @@ def initialize_database():
         return False
 
 # --- PTT Scraper Logic ---
-PTT_URL = "https://ptt-discussion.tw"
+# [UPDATE] 將目標網址還原為 www.ptt.cc
+PTT_URL = "https://www.ptt.cc"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
 cookies = {"over18": "1"}
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
 ]
 
 async def deep_scrape_ppi():
@@ -117,13 +116,15 @@ async def deep_scrape_ppi():
                 response.raise_for_status()
                 
                 soup = BeautifulSoup(response.text, "html.parser")
-                # [FIX] 更新了文章列表的 CSS 選擇器以匹配新網站
-                articles = soup.select("a.list-post-item")
+                # [FIX] 將 CSS 選擇器還原為適用於 www.ptt.cc 的 'div.r-ent'
+                articles = soup.select("div.r-ent")
                 
                 article_urls = []
-                for article_link in articles:
-                    if article_link.has_attr('href'):
-                        article_urls.append(PTT_URL + article_link['href'])
+                for article in articles:
+                    # [FIX] 還原獲取連結的邏輯
+                    link_tag = article.select_one("div.title a")
+                    if link_tag and link_tag.has_attr('href'):
+                        article_urls.append(PTT_URL + link_tag['href'])
 
                 if not article_urls:
                     print("[警告] 在列表頁上沒有找到任何文章連結。")
@@ -154,7 +155,7 @@ async def scrape_article(client: httpx.AsyncClient, url: str):
         article_res = await client.get(url, timeout=20)
         article_res.raise_for_status()
         article_soup = BeautifulSoup(article_res.text, 'html.parser')
-        # [FIX] 更新了留言的 CSS 選擇器
+        # www.ptt.cc 的留言選擇器，這個是正確的
         pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
         boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
         return len(pushes), len(boos)
@@ -184,7 +185,8 @@ async def scrape_and_save_periodically():
                     db.add(new_record)
                     db.commit()
                     print(f"PPI {ppi:.2f}% 已成功存入資料庫。")
-                    # WebSocket廣播已移除，以簡化並專注於API
+                    message = json.dumps({"type": "ppi_update", "timestamp": time.time(), "ppi": ppi})
+                    await manager.broadcast(message)
                 finally:
                     db.close()
         except Exception as e:
@@ -247,3 +249,74 @@ def get_current_discount():
         raise HTTPException(status_code=500, detail="計算折扣時發生內部錯誤")
     finally:
         db.close()
+
+@app.get("/api/history")
+def get_history(timescale: str = "realtime"):
+    if not db_ready or SessionLocal is None:
+        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
+    db = SessionLocal()
+    try:
+        if timescale == "realtime":
+             start_time = datetime.utcnow() - timedelta(hours=1)
+             records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= start_time).order_by(SentimentRecord.timestamp.asc()).all()
+             return [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in records]
+        
+        interval_map = {"30m": '30 minutes', "1h": '1 hour'}
+        if timescale not in interval_map: return {"error": "Invalid timescale"}
+        
+        start_time_map = {"30m": datetime.utcnow() - timedelta(hours=24), "1h": datetime.utcnow() - timedelta(days=3)}
+        start_time = start_time_map[timescale]
+        interval = interval_map[timescale]
+
+        query = db.query(
+            func.date_trunc(interval, SentimentRecord.timestamp).label('bucket'),
+            func.avg(SentimentRecord.ppi).label('avg_pni')
+        ).filter(SentimentRecord.timestamp >= start_time).group_by('bucket').order_by('bucket')
+        
+        return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_pni} for r in query.all()]
+    finally:
+        db.close()
+
+@app.post("/api/update-settings")
+def update_settings(payload: SettingsUpdate):
+    if not db_ready or SessionLocal is None:
+        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
+    if payload.secret_key != ADMIN_SECRET_KEY:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="無效的管理員密碼")
+    
+    db = SessionLocal()
+    try:
+        settings_to_update = {
+            "base_discount": payload.base_discount,
+            "ppi_threshold": payload.ppi_threshold,
+            "conversion_factor": payload.conversion_factor,
+        }
+        for key, value in settings_to_update.items():
+            db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).update({"setting_value": value})
+        db.commit()
+        return {"message": "折扣設定已成功更新！"}
+    finally:
+        db.close()
+
+@app.get("/api/get-settings")
+def get_settings():
+    if not db_ready or SessionLocal is None:
+        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
+    db = SessionLocal()
+    try:
+        settings_query = db.query(DiscountSetting).all()
+        return {s.setting_name: s.setting_value for s in settings_query}
+    finally:
+        db.close()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
