@@ -172,7 +172,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
         const { base_discount, ppi_threshold, conversion_factor } = settings;
         formulaDisplayEl.textContent = `${base_discount}% + (${ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${conversion_factor}`;
-        const discountValue = (/*100 - final_discount_percentage*/ (100 - (base_discount + ((ppi_threshold - current_ppi) * conversion_factor))) / 10 );
+        const discountValue = (/*100 - final_discount_percentage*/ (100 - (base_discount + (ppi_threshold - current_ppi) * conversion_factor)));
         discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
         // 將新的數據點加入圖表
         const chartData = sentimentChart.data.datasets[0].data;
