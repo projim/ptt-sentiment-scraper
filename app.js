@@ -1,6 +1,5 @@
-//V1.11
 document.addEventListener('DOMContentLoaded', () => {
-    // 檢查函式庫
+    // 檢查所有必要的函式庫是否都已成功載入
     if (typeof Chart === 'undefined' || typeof JsBarcode === 'undefined' || typeof window.dateFns === 'undefined') {
         console.error("Fatal Error: A required library failed to load.");
         document.getElementById('connection-status').innerHTML = "關鍵函式庫載入失敗，請檢查 libs 資料夾或網路連線並刷新頁面。";
@@ -28,9 +27,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let countdownInterval;
     let currentDiscountData = null;
 
-    const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render 上設定的服務名稱
-    const API_BASE_URL = `https://${serviceName}.onrender.com`;
-    
+    // [FINAL FIX] 請將此處的網址，換成您在 "Railway" 上的真實公開網址！
+    const API_BASE_URL = "https://ptt-gossiping-live-production.railway.app"; // <--- 請務必修改這裡！
+
     const chartConfig = {
         type: 'line',
         data: {
@@ -105,7 +104,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 currentDiscountData = await response.json();
                 if (currentDiscountData.error) throw new Error(currentDiscountData.error);
             }
-
             const response = await fetch(`${API_BASE_URL}/api/history?timescale=realtime`);
             if (!response.ok) throw new Error('無法獲取歷史數據');
             const history = await response.json();
@@ -117,7 +115,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }));
             sentimentChart.data.datasets[0].data = initialData;
             sentimentChart.update();
-            console.log(`已成功載入 ${initialData.length} 筆歷史折扣數據。`);
         } catch (error) {
             console.error("初始化圖表歷史數據失敗:", error);
             connectionStatusEl.textContent = "載入歷史數據失敗。";
@@ -154,13 +151,10 @@ document.addEventListener('DOMContentLoaded', () => {
         discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
         ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
         formulaDisplayEl.textContent = `${settings.base_discount}% + (${settings.ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${settings.conversion_factor}`;
-
-        // [FIX] 將「最終折扣率」而不是原始 PPI 加入圖表
+        
         const chartData = sentimentChart.data.datasets[0].data;
         chartData.push({ x: new Date(), y: final_discount_percentage });
-        if (chartData.length > 60) {
-            chartData.shift();
-        }
+        if (chartData.length > 60) chartData.shift();
         sentimentChart.update('quiet');
     }
     
@@ -196,8 +190,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function initialize() {
         sentimentChart = new Chart(ctx, chartConfig);
-        await initializeChartWithHistory();
-        await fetchAndUpdateDiscount();
+        await fetchAndUpdateDiscount(); // 先獲取一次當前折扣和設定
+        await initializeChartWithHistory(); // 再用設定去初始化圖表
         mainInterval = setInterval(fetchAndUpdateDiscount, 60000);
         generateCodeBtn.addEventListener('click', showBarcode);
         closeModalBtn.addEventListener('click', () => {
