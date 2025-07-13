@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
+from playwright.async_api import async_playwright
 
 # --- Pydantic Models for Data Validation ---
 class SettingsUpdate(BaseModel):
