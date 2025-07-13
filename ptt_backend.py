@@ -1,5 +1,5 @@
 import asyncio
-from playwright.async_api import async_playwright
+import httpx
 from bs4 import BeautifulSoup
 import json
 import time
@@ -60,7 +60,12 @@ def initialize_database():
     
     db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     try:
-        engine = create_engine(db_url_for_sqlalchemy, pool_pre_ping=True)
+        # [FIX] 加入 connect_args={"sslmode": "require"} 來強制使用 SSL 連線
+        engine = create_engine(
+            db_url_for_sqlalchemy, 
+            connect_args={"sslmode": "require"}, 
+            pool_pre_ping=True
+        )
         with engine.connect() as connection:
             print("[成功] 資料庫連接成功！")
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
