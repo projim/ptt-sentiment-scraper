@@ -25,13 +25,13 @@
 
             <div>
                 <label for="ppi_threshold" class="block text-sm font-medium text-gray-700">2. 情緒門檻 (PPI %)</label>
-                <p class="text-xs text-gray-500 mb-1">當 PPI 超過這個值，才開始計算額外折扣。</p>
+                <p class="text-xs text-gray-500 mb-1">當 PPI **低於**這個值，才開始計算額外折扣。</p>
                 <input type="number" id="ppi_threshold" step="1" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
             </div>
 
             <div>
                 <label for="conversion_factor" class="block text-sm font-medium text-gray-700">3. 轉換係數</label>
-                <p class="text-xs text-gray-500 mb-1">PPI 每增加 1%，折扣額外增加的百分比。</p>
+                <p class="text-xs text-gray-500 mb-1">PPI 每**低於**門檻 1%，折扣額外增加的百分比。</p>
                 <input type="number" id="conversion_factor" step="0.01" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
             </div>
             
@@ -39,7 +39,7 @@
 
             <div>
                 <label for="secret_key" class="block text-sm font-medium text-red-700">管理員密碼</label>
-                <p class="text-xs text-gray-500 mb-1">請輸入您在 Render 環境變數中設定的密碼。</p>
+                <p class="text-xs text-gray-500 mb-1">請輸入您在 Render/Railway 環境變數中設定的密碼。</p>
                 <input type="password" id="secret_key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required>
             </div>
 
@@ -52,7 +52,7 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render 上的真實服務名稱
+            const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render/Railway 上的真實服務名稱
             const API_BASE_URL = `https://${serviceName}.onrender.com`;
             
             const form = document.getElementById('settings-form');
@@ -75,8 +75,8 @@
                     }
                     const settings = await response.json();
                     baseDiscountInput.value = settings.base_discount || 5.0;
-                    ppiThresholdInput.value = settings.ppi_threshold || 60.0;
-                    conversionFactorInput.value = settings.conversion_factor || 0.25;
+                    ppiThresholdInput.value = settings.ppi_threshold || 70.0;
+                    conversionFactorInput.value = settings.conversion_factor || 0.5;
                     loadingEl.style.display = 'none';
                     form.style.display = 'block';
                 } catch (error) {
