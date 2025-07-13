@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // 檢查所有必要的函式庫是否都已成功載入
+    // 檢查函式庫
     if (typeof Chart === 'undefined' || typeof JsBarcode === 'undefined' || typeof window.dateFns === 'undefined') {
         console.error("Fatal Error: A required library failed to load.");
         document.getElementById('connection-status').innerHTML = "關鍵函式庫載入失敗，請檢查 libs 資料夾或網路連線並刷新頁面。";
@@ -34,7 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
         type: 'line',
         data: {
             datasets: [{
-                label: '折扣率 (%)', // Y軸標籤
+                label: '折扣率 (% OFF)',
                 data: [],
                 borderColor: 'rgba(52, 211, 153, 0.8)',
                 backgroundColor: 'rgba(52, 211, 153, 0.2)',
@@ -57,12 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     },
                     display: true,
                     grid: { color: 'rgba(255, 255, 255, 0.1)' },
-                    ticks: {
-                        color: 'rgba(255, 255, 255, 0.7)',
-                        maxRotation: 0,
-                        autoSkip: true,
-                        maxTicksLimit: 7
-                    }
+                    ticks: { color: 'rgba(255, 255, 255, 0.7)', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 }
                 },
                 y: {
                     display: true,
@@ -73,23 +68,15 @@ document.addEventListener('DOMContentLoaded', () => {
                             return `${((100 - value) / 10).toFixed(1)}折`;
                         }
                     },
-                    title: {
-                        display: true,
-                        text: '即時折扣率',
-                        color: 'rgba(255, 255, 255, 0.9)'
-                    }
+                    title: { display: true, text: '即時折扣', color: 'rgba(255, 255, 255, 0.9)' }
                 }
             },
             plugins: {
                 legend: { display: false },
                 tooltip: {
-                    enabled: true,
-                    mode: 'index',
-                    intersect: false,
+                    enabled: true, mode: 'index', intersect: false,
                     callbacks: {
-                        title: function(context) {
-                            return format(context[0].parsed.x, 'HH:mm:ss');
-                        },
+                        title: function(context) { return format(context[0].parsed.x, 'HH:mm:ss'); },
                         label: function(context) {
                             const discountOff = context.parsed.y;
                             const discountValue = (100 - discountOff) / 10;
@@ -103,10 +90,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function calculateDiscountFromPpi(ppi, settings) {
         const { base_discount = 5.0, ppi_threshold = 70.0, conversion_factor = 0.5, discount_cap = 25.0 } = settings;
-        let extra_discount = 0;
-        if (ppi < ppi_threshold) {
-            extra_discount = (ppi_threshold - ppi) * conversion_factor;
-        }
+        const extra_discount = Math.max(0, (ppi_threshold - ppi) * conversion_factor);
         const final_discount = Math.min(base_discount + extra_discount, discount_cap);
         return final_discount;
     }
@@ -114,10 +98,9 @@ document.addEventListener('DOMContentLoaded', () => {
     async function initializeChartWithHistory() {
         try {
             connectionStatusEl.textContent = "正在載入歷史數據...";
-            // 確保我們先獲取到當前的折扣設定
             if (!currentDiscountData) {
                 const response = await fetch(`${API_BASE_URL}/api/current-discount`);
-                if (!response.ok) throw new Error('無法獲取折扣設定');
+                if (!response.ok) throw new Error('無法獲取折扣設定來初始化圖表');
                 currentDiscountData = await response.json();
                 if (currentDiscountData.error) throw new Error(currentDiscountData.error);
             }
@@ -140,9 +123,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function fetchDiscount() {
+    async function fetchAndUpdateDiscount() {
         try {
-            // 不再顯示 "正在獲取..."，因為這是背景輪詢
             const response = await fetch(`${API_BASE_URL}/api/current-discount`);
             if (!response.ok) throw new Error(`Network response was not ok (${response.status})`);
             const data = await response.json();
@@ -155,8 +137,6 @@ document.addEventListener('DOMContentLoaded', () => {
             connectionStatusEl.textContent = `連線正常 | 上次更新：${new Date().toLocaleTimeString('zh-TW')}`;
             connectionStatusEl.classList.remove('text-yellow-400', 'text-red-500');
             connectionStatusEl.classList.add('text-green-400');
-
-
         } catch (error) {
             console.error('獲取折扣失敗:', error);
             connectionStatusEl.textContent = "獲取失敗，將於下一分鐘重試...";
@@ -169,12 +149,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateUIDisplay(data) {
         const { current_ppi, final_discount_percentage, settings } = data;
-        ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
-        const { base_discount, ppi_threshold, conversion_factor } = settings;
-        formulaDisplayEl.textContent = `${base_discount}% + (${ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${conversion_factor}`;
-        const discountValue = (/*100 - final_discount_percentage*/ (100 - (base_discount + (ppi_threshold - current_ppi) * conversion_factor))/10);
+        const discountValue = (100 - final_discount_percentage) / 10;
         discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
-        // 將新的數據點加入圖表
+        ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
+        formulaDisplayEl.textContent = `${settings.base_discount}% + (${settings.ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${settings.conversion_factor}`;
+
+        // [FIX] 將「最終折扣率」而不是原始 PPI 加入圖表
         const chartData = sentimentChart.data.datasets[0].data;
         chartData.push({ x: new Date(), y: final_discount_percentage });
         if (chartData.length > 60) {
@@ -216,8 +196,8 @@ document.addEventListener('DOMContentLoaded', () => {
     async function initialize() {
         sentimentChart = new Chart(ctx, chartConfig);
         await initializeChartWithHistory();
-        await fetchDiscount();
-        mainInterval = setInterval(fetchDiscount, 60000);
+        await fetchAndUpdateDiscount();
+        mainInterval = setInterval(fetchAndUpdateDiscount, 60000);
         generateCodeBtn.addEventListener('click', showBarcode);
         closeModalBtn.addEventListener('click', () => {
             codeModal.classList.add('hidden');
