@@ -1,3 +1,4 @@
+//V1.11
 document.addEventListener('DOMContentLoaded', () => {
     // 檢查函式庫
     if (typeof Chart === 'undefined' || typeof JsBarcode === 'undefined' || typeof window.dateFns === 'undefined') {
