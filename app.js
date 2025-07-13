@@ -28,7 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentDiscountData = null;
 
     // [FINAL FIX] 請將此處的網址，換成您在 "Railway" 上的真實公開網址！
-    const API_BASE_URL = "https://ptt-gossiping-live-production.railway.app"; // <--- 請務必修改這裡！
+    const API_BASE_URL = "https://ptt-gossiping-live-production.up.railway.app"; // <--- 請務必修改這裡！
 
     const chartConfig = {
         type: 'line',
