@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import json
 import time
 import os
+import random
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String, func
@@ -12,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
+from playwright.async_api import async_playwright
 
 # --- Pydantic Models for Data Validation ---
 class SettingsUpdate(BaseModel):
@@ -22,7 +24,7 @@ class SettingsUpdate(BaseModel):
 
 # --- FastAPI App & CORS ---
 app = FastAPI()
-origins = ["*"] # 允許所有來源，以解決 WebSocket 的 403 Forbidden 問題
+origins = ["*"] # 允許所有來源，以解決 API 和 WebSocket 的跨來源問題
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -37,7 +39,7 @@ ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
 engine = None
 SessionLocal = None
 Base = declarative_base()
-db_ready = False
+db_ready = False # 用於檢查資料庫是否已就緒的全域標誌
 
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
@@ -69,8 +71,10 @@ def initialize_database():
         db = SessionLocal()
         try:
             default_settings = {
-                "base_discount": 5.0, "ppi_threshold": 60.0,
-                "conversion_factor": 0.25, "discount_cap": 25.0
+                "base_discount": 5.0, 
+                "ppi_threshold": 70.0,
+                "conversion_factor": 0.5,
+                "discount_cap": 25.0
             }
             for key, value in default_settings.items():
                 if not db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).first():
@@ -79,6 +83,7 @@ def initialize_database():
             print("預設折扣設定已確認。")
         finally:
             db.close()
+        
         db_ready = True
         return True
     except Exception as e:
@@ -86,69 +91,87 @@ def initialize_database():
         db_ready = False
         return False
 
-# --- PTT Scraper Logic ---
+# --- PTT Scraper using Playwright ---
 PTT_URL = "https://www.ptt.cc"
 GOSSIPING_BOARD_URL = f"{PTT_URL}/bbs/Gossiping/index.html"
-cookies = {"over18": "1"}
-headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+]
 
 async def deep_scrape_ppi():
+    """使用 Playwright 進行深度分析，模擬真人瀏覽"""
     try:
-        async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=40) as client:
-            response = await client.get(GOSSIPING_BOARD_URL)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            articles = soup.find_all("div", class_="r-ent")
-            article_urls = [PTT_URL + a.find('a')['href'] for a in articles if a.find('a') and 'M.' in a.find('a')['href']]
-            scrape_tasks = [scrape_article(client, url) for url in article_urls]
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page(user_agent=random.choice(USER_AGENTS))
+            
+            print("[爬蟲] 正在前往 PTT 八卦版...")
+            await page.goto(GOSSIPING_BOARD_URL, wait_until='domcontentloaded', timeout=60000)
+            
+            try:
+                agree_button = page.locator('button:has-text("我同意，我已年滿十八歲")')
+                await agree_button.wait_for(timeout=5000)
+                print("[爬蟲] 偵測到年齡確認，正在點擊...")
+                await agree_button.click()
+                await page.wait_for_load_state('networkidle', timeout=60000)
+            except Exception:
+                print("[爬蟲] 未偵測到年齡確認按鈕，直接繼續。")
+
+            content = await page.content()
+            soup = BeautifulSoup(content, "html.parser")
+            
+            articles = soup.select("div.r-ent")
+            article_urls = [PTT_URL + a.select_one("div.title a")['href'] for a in articles if a.select_one("div.title a")]
+
+            if not article_urls:
+                print("[警告] 在列表頁上沒有找到任何文章連結。")
+                await browser.close()
+                return 0.0
+
+            total_push, total_boo = 0, 0
+            
+            scrape_tasks = [scrape_article(page, url) for url in article_urls[:10]]
             results = await asyncio.gather(*scrape_tasks)
-            total_push = sum(r[0] for r in results)
-            total_boo = sum(r[1] for r in results)
+            
+            for push, boo in results:
+                total_push += push
+                total_boo += boo
+
+            await browser.close()
+
             total_votes = total_push + total_boo
             ppi = (total_push / total_votes) * 100 if total_votes > 0 else 0
+            
             print(f"--- 深度分析完成 --- PPI: {ppi:.2f}%")
             return ppi
     except Exception as e:
-        print(f"[錯誤] 爬取列表頁失敗: {e}")
+        print(f"[重大錯誤] Playwright 爬取時發生未知錯誤: {e}")
         return None
 
-async def scrape_article(client: httpx.AsyncClient, url: str):
+async def scrape_article(page, url: str):
     try:
-        await asyncio.sleep(0.25)
-        article_res = await client.get(url, timeout=15)
-        article_soup = BeautifulSoup(article_res.text, 'html.parser')
-        pushes = article_soup.find_all('span', class_='push-tag', string=lambda text: '推' in text)
-        boos = article_soup.find_all('span', class_='push-tag', string=lambda text: '噓' in text)
+        await page.goto(url, wait_until='domcontentloaded', timeout=20000)
+        article_soup = BeautifulSoup(await page.content(), 'html.parser')
+        pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
+        boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
         return len(pushes), len(boos)
     except Exception as e:
         print(f"[警告] 爬取內頁 {url} 失敗: {e}")
         return 0, 0
 
-# --- WebSocket & Background Task ---
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        print(f"新的客戶端連接: {websocket.client.host}")
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        print(f"客戶端斷開連接: {websocket.client.host}")
-    async def broadcast(self, message: str):
-        await asyncio.gather(*[connection.send_text(message) for connection in self.active_connections])
-
-manager = ConnectionManager()
-
+# --- Background Task ---
 async def scrape_and_save_periodically():
     print("背景任務啟動，正在初始化資料庫...")
     initialized = await run_in_threadpool(initialize_database)
+
     if not initialized:
         print("[背景任務終止] 因資料庫初始化失敗，背景任務無法繼續。")
         return
 
     print("背景任務：資料庫已就緒。將在 15 秒後開始第一次爬取...")
     await asyncio.sleep(15)
+
     while True:
         try:
             ppi = await deep_scrape_ppi()
@@ -159,12 +182,11 @@ async def scrape_and_save_periodically():
                     db.add(new_record)
                     db.commit()
                     print(f"PPI {ppi:.2f}% 已成功存入資料庫。")
-                    message = json.dumps({"type": "ppi_update", "timestamp": time.time(), "ppi": ppi})
-                    await manager.broadcast(message)
                 finally:
                     db.close()
         except Exception as e:
             print(f"[重大錯誤] 背景爬蟲任務主迴圈發生未知錯誤: {e}")
+        
         print(f"下一次爬取將在 3 分鐘後進行...")
         await asyncio.sleep(180)
 
@@ -172,6 +194,7 @@ async def scrape_and_save_periodically():
 @app.on_event("startup")
 async def startup_event():
     print("伺服器啟動中...")
+    print("正在排程背景初始化與爬蟲任務...")
     asyncio.create_task(scrape_and_save_periodically())
     print("伺服器已啟動，背景任務將在後台進行初始化。")
 
@@ -183,21 +206,36 @@ def read_root():
 def get_current_discount():
     if not db_ready or SessionLocal is None:
         raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
     db = SessionLocal()
     try:
         settings_query = db.query(DiscountSetting).all()
         settings = {s.setting_name: s.setting_value for s in settings_query}
+        
         base_discount = settings.get("base_discount", 5.0)
-        ppi_threshold = settings.get("ppi_threshold", 60.0)
-        conversion_factor = settings.get("conversion_factor", 0.25)
+        ppi_threshold = settings.get("ppi_threshold", 70.0)
+        conversion_factor = settings.get("conversion_factor", 0.5)
         discount_cap = settings.get("discount_cap", 25.0)
+
         start_time = datetime.utcnow() - timedelta(minutes=15)
         avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
-        current_ppi = avg_ppi_query if avg_ppi_query is not None else 0.0
-        extra_discount = max(0, (current_ppi - ppi_threshold) * conversion_factor)
-        final_discount = min(base_discount + extra_discount, discount_cap)
+        
+        ppi_for_calculation = avg_ppi_query if avg_ppi_query is not None else 0.0
+
+        if ppi_for_calculation == 0.0:
+            last_valid_ppi_record = db.query(SentimentRecord.ppi).filter(SentimentRecord.ppi > 0).order_by(SentimentRecord.timestamp.desc()).first()
+            if last_valid_ppi_record:
+                ppi_for_calculation = last_valid_ppi_record[0]
+
+        extra_discount = 0
+        if ppi_for_calculation < ppi_threshold:
+            extra_discount = (ppi_threshold - ppi_for_calculation) * conversion_factor
+        
+        final_discount = base_discount + extra_discount
+        final_discount = min(final_discount, discount_cap)
+
         return {
-            "current_ppi": round(current_ppi, 2),
+            "current_ppi": round(ppi_for_calculation, 2),
             "final_discount_percentage": round(final_discount, 2),
             "settings": settings
         }
@@ -208,6 +246,7 @@ def get_current_discount():
 def get_history(timescale: str = "realtime"):
     if not db_ready or SessionLocal is None:
         raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
     db = SessionLocal()
     try:
         if timescale == "realtime":
@@ -215,9 +254,9 @@ def get_history(timescale: str = "realtime"):
              records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= start_time).order_by(SentimentRecord.timestamp.asc()).all()
              return [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in records]
         
+        # 這部分是為了未來可能的擴充，目前前端沒有使用
         interval_map = {"30m": '30 minutes', "1h": '1 hour'}
-        if timescale not in interval_map:
-             return {"error": "Invalid timescale"}
+        if timescale not in interval_map: return {"error": "Invalid timescale"}
         
         start_time_map = {"30m": datetime.utcnow() - timedelta(hours=24), "1h": datetime.utcnow() - timedelta(days=3)}
         start_time = start_time_map[timescale]
@@ -225,10 +264,10 @@ def get_history(timescale: str = "realtime"):
 
         query = db.query(
             func.date_trunc(interval, SentimentRecord.timestamp).label('bucket'),
-            func.avg(SentimentRecord.ppi).label('avg_ppi')
+            func.avg(SentimentRecord.ppi).label('avg_pni')
         ).filter(SentimentRecord.timestamp >= start_time).group_by('bucket').order_by('bucket')
         
-        return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_ppi} for r in query.all()]
+        return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_pni} for r in query.all()]
     finally:
         db.close()
 
@@ -236,8 +275,10 @@ def get_history(timescale: str = "realtime"):
 def update_settings(payload: SettingsUpdate):
     if not db_ready or SessionLocal is None:
         raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
     if payload.secret_key != ADMIN_SECRET_KEY:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="無效的管理員密碼")
+    
     db = SessionLocal()
     try:
         settings_to_update = {
@@ -256,21 +297,10 @@ def update_settings(payload: SettingsUpdate):
 def get_settings():
     if not db_ready or SessionLocal is None:
         raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
+    
     db = SessionLocal()
     try:
         settings_query = db.query(DiscountSetting).all()
         return {s.setting_name: s.setting_value for s in settings_query}
     finally:
         db.close()
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """[FIX] 修正函式定義，移除錯誤的 request 參數"""
-    origin = websocket.headers.get('origin')
-    print(f"WebSocket 連線請求來自: {origin}")
-    await manager.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
