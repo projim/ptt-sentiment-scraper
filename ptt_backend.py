@@ -60,7 +60,7 @@ def initialize_database():
     
     db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     try:
-        engine = create_engine(db_url_for_sqlalchemy, pool_pre_ping=True)
+        engine = create_engine(db_url_for_sqlalchemy, pool_pre_ping=True, connect_args={"sslmode": "require"})
         with engine.connect() as connection:
             print("[成功] 資料庫連接成功！")
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -108,14 +108,16 @@ async def deep_scrape_ppi():
             print("[爬蟲] 正在前往 PTT 八卦版...")
             await page.goto(GOSSIPING_BOARD_URL, wait_until='domcontentloaded', timeout=60000)
             
+            # [FIX] 修正了 Playwright 的函式呼叫方式，以確保版本相容性
             try:
                 agree_button = page.locator('button:has-text("我同意，我已年滿十八歲")')
-                await agree_button.wait_for(timeout=5000)
+                # 先等待元素出現，再檢查是否可見
+                await agree_button.wait_for(state='visible', timeout=5000)
                 print("[爬蟲] 偵測到年齡確認，正在點擊...")
                 await agree_button.click()
                 await page.wait_for_load_state('networkidle', timeout=60000)
             except Exception:
-                print("[爬蟲] 未偵測到年齡確認按鈕，直接繼續。")
+                print("[爬蟲] 未偵測到年齡確認按鈕或已超時，直接繼續。")
 
             content = await page.content()
             soup = BeautifulSoup(content, "html.parser")
@@ -149,7 +151,6 @@ async def deep_scrape_ppi():
         return None
 
 async def scrape_article(page, url: str):
-    """[FIX] 為單一文章的爬取加入重試機制"""
     max_retries = 2
     for attempt in range(max_retries):
         try:
@@ -157,16 +158,15 @@ async def scrape_article(page, url: str):
             article_soup = BeautifulSoup(await page.content(), 'html.parser')
             pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
             boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
-            return len(pushes), len(boos) # 成功後直接回傳結果
+            return len(pushes), len(boos)
         except Exception as e:
             print(f"[警告] 爬取內頁 {url} 失敗 (第 {attempt + 1}/{max_retries} 次嘗試): {e}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(random.uniform(1, 3)) # 等待 1-3 秒後重試
+                await asyncio.sleep(random.uniform(1, 3))
             else:
                 print(f"[錯誤] 內頁 {url} 達到最大重試次數，放棄。")
-                return 0, 0 # 重試失敗後回傳 0
+                return 0, 0
     return 0, 0
-
 
 # --- Background Task ---
 async def scrape_and_save_periodically():
@@ -206,6 +206,7 @@ async def startup_event():
     asyncio.create_task(scrape_and_save_periodically())
     print("伺服器已啟動，背景任務將在後台進行初始化。")
 
+# ... (所有 API 端點，如 /api/current-discount, /api/history 等，都保持不變) ...
 @app.get("/")
 def read_root():
     return {"status": "PTT Discount Engine API is alive"}
