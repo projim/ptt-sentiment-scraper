@@ -1,5 +1,5 @@
 import asyncio
-import httpx
+from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import json
 import time
@@ -13,7 +13,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
-from playwright.async_api import async_playwright
 
 # --- Pydantic Models for Data Validation ---
 class SettingsUpdate(BaseModel):
@@ -61,12 +60,7 @@ def initialize_database():
     
     db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     try:
-        # [FIX] 加入 connect_args={"sslmode": "require"} 來強制使用 SSL 連線
-        engine = create_engine(
-            db_url_for_sqlalchemy, 
-            connect_args={"sslmode": "require"}, 
-            pool_pre_ping=True
-        )
+        engine = create_engine(db_url_for_sqlalchemy, pool_pre_ping=True)
         with engine.connect() as connection:
             print("[成功] 資料庫連接成功！")
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -155,15 +149,24 @@ async def deep_scrape_ppi():
         return None
 
 async def scrape_article(page, url: str):
-    try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=20000)
-        article_soup = BeautifulSoup(await page.content(), 'html.parser')
-        pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
-        boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
-        return len(pushes), len(boos)
-    except Exception as e:
-        print(f"[警告] 爬取內頁 {url} 失敗: {e}")
-        return 0, 0
+    """[FIX] 為單一文章的爬取加入重試機制"""
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=20000)
+            article_soup = BeautifulSoup(await page.content(), 'html.parser')
+            pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
+            boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
+            return len(pushes), len(boos) # 成功後直接回傳結果
+        except Exception as e:
+            print(f"[警告] 爬取內頁 {url} 失敗 (第 {attempt + 1}/{max_retries} 次嘗試): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(random.uniform(1, 3)) # 等待 1-3 秒後重試
+            else:
+                print(f"[錯誤] 內頁 {url} 達到最大重試次數，放棄。")
+                return 0, 0 # 重試失敗後回傳 0
+    return 0, 0
+
 
 # --- Background Task ---
 async def scrape_and_save_periodically():
