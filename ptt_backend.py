@@ -1,11 +1,11 @@
 import asyncio
-import httpx
+from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import json
 import time
 import os
 import random
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, status
+from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String, func
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -13,7 +13,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
-from playwright.async_api import async_playwright
 
 # --- Pydantic Models for Data Validation ---
 class SettingsUpdate(BaseModel):
@@ -24,7 +23,7 @@ class SettingsUpdate(BaseModel):
 
 # --- FastAPI App & CORS ---
 app = FastAPI()
-origins = ["*"] # 允許所有來源，以解決 API 和 WebSocket 的跨來源問題
+origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -39,7 +38,7 @@ ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
 engine = None
 SessionLocal = None
 Base = declarative_base()
-db_ready = False # 用於檢查資料庫是否已就緒的全域標誌
+db_ready = False
 
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
@@ -254,7 +253,6 @@ def get_history(timescale: str = "realtime"):
              records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= start_time).order_by(SentimentRecord.timestamp.asc()).all()
              return [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in records]
         
-        # 這部分是為了未來可能的擴充，目前前端沒有使用
         interval_map = {"30m": '30 minutes', "1h": '1 hour'}
         if timescale not in interval_map: return {"error": "Invalid timescale"}
         
