@@ -27,8 +27,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let countdownInterval;
     let currentDiscountData = null;
 
-    const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render/Railway 上的真實服務名稱
-    const API_BASE_URL = `https://${serviceName}.onrender.com`;
+    // [FINAL FIX] 請將此處的網址，換成您在 "Railway" 上的真實公開網址！
+    // 例如：https://my-cool-app.up.railway.app
+    const API_BASE_URL = "https://ptt-gossiping-live-production.up.railway.app"; // <--- 請務必修改這裡！
     
     const chartConfig = {
         type: 'line',
@@ -40,7 +41,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 backgroundColor: 'rgba(52, 211, 153, 0.2)',
                 borderWidth: 2,
                 pointRadius: 0,
-                // [UPDATE] 將 tension 從 0.4 改為 0，使線條變為直線
                 tension: 0,
                 fill: true,
             }]
@@ -101,7 +101,6 @@ document.addEventListener('DOMContentLoaded', () => {
     async function initializeChartWithHistory() {
         try {
             connectionStatusEl.textContent = "正在載入歷史數據...";
-            // 確保我們先獲取到當前的折扣設定，用於計算
             if (!currentDiscountData) {
                 const response = await fetch(`${API_BASE_URL}/api/current-discount`);
                 if (!response.ok) throw new Error('無法獲取折扣設定來初始化圖表');
