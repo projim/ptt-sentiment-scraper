@@ -26,8 +26,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let mainInterval;
     let countdownInterval;
     let currentDiscountData = null;
-    const serviceName = "ptt-gossiping-live-production"; // 請務必換成您在 Render 上設定的服務名稱
-    const API_BASE_URL = `https://${serviceName}.up.railway.app`;
+
+    const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render/Railway 上的真實服務名稱
+    const API_BASE_URL = `https://${serviceName}.onrender.com`;
     
     const chartConfig = {
         type: 'line',
@@ -39,7 +40,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 backgroundColor: 'rgba(52, 211, 153, 0.2)',
                 borderWidth: 2,
                 pointRadius: 0,
-                tension: 0.4,
+                // [UPDATE] 將 tension 從 0.4 改為 0，使線條變為直線
+                tension: 0,
                 fill: true,
             }]
         },
@@ -95,7 +97,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return final_discount;
     }
 
-    // [FIX] 獲取並預填歷史數據的函式
+    // 獲取並預填歷史數據的函式
     async function initializeChartWithHistory() {
         try {
             connectionStatusEl.textContent = "正在載入歷史數據...";
@@ -126,7 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // [FIX] 簡化後的折扣獲取與 UI 更新函式
+    // 簡化後的折扣獲取與 UI 更新函式
     async function fetchAndUpdateDiscount() {
         try {
             const response = await fetch(`${API_BASE_URL}/api/current-discount`);
@@ -200,7 +202,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
 
-    // [FIX] 全新的、更穩健的啟動流程
+    // 全新的、更穩健的啟動流程
     async function initialize() {
         // 1. 立即初始化一個空的圖表
         sentimentChart = new Chart(ctx, chartConfig);
