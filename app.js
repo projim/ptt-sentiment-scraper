@@ -26,9 +26,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let mainInterval;
     let countdownInterval;
     let currentDiscountData = null;
-
-    const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render 上設定的服務名稱
-    const API_BASE_URL = `https://${serviceName}.onrender.com`;
+    const serviceName = "ptt-gossiping-live-production"; // 請務必換成您在 Render 上設定的服務名稱
+    const API_BASE_URL = `https://${serviceName}.up.railway.app`;
     
     const chartConfig = {
         type: 'line',
