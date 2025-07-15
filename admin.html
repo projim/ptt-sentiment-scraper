@@ -39,7 +39,7 @@
 
             <div>
                 <label for="secret_key" class="block text-sm font-medium text-red-700">管理員密碼</label>
-                <p class="text-xs text-gray-500 mb-1">請輸入您在 Render/Railway 環境變數中設定的密碼。</p>
+                <p class="text-xs text-gray-500 mb-1">請輸入您在 Railway 環境變數中設定的密碼。</p>
                 <input type="password" id="secret_key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required>
             </div>
 
@@ -52,8 +52,9 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Render/Railway 上的真實服務名稱
-            const API_BASE_URL = `https://${serviceName}.onrender.com`;
+            // [FIX] 請將此處的網址，換成您在 "Railway" 上的真實公開網址！
+            // 例如：https://my-cool-app.up.railway.app
+            const API_BASE_URL = "https://ptt-gossiping-live-production.up.railway.app"; 
             
             const form = document.getElementById('settings-form');
             const loadingEl = document.getElementById('loading');
@@ -65,6 +66,7 @@
             const conversionFactorInput = document.getElementById('conversion_factor');
             const secretKeyInput = document.getElementById('secret_key');
 
+            // 載入頁面時，先獲取當前的設定值
             async function loadCurrentSettings() {
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/get-settings`);
@@ -74,9 +76,11 @@
                         throw new Error(`無法獲取當前設定. ${errorDetail}`);
                     }
                     const settings = await response.json();
+
                     baseDiscountInput.value = settings.base_discount || 5.0;
                     ppiThresholdInput.value = settings.ppi_threshold || 70.0;
                     conversionFactorInput.value = settings.conversion_factor || 0.5;
+                    
                     loadingEl.style.display = 'none';
                     form.style.display = 'block';
                 } catch (error) {
@@ -85,27 +89,33 @@
                 }
             }
 
+            // 提交表單時，發送更新請求
             form.addEventListener('submit', async (e) => {
                 e.preventDefault();
                 submitBtn.disabled = true;
                 submitBtn.textContent = '儲存中...';
                 messageEl.textContent = '';
+
                 const payload = {
                     base_discount: parseFloat(baseDiscountInput.value),
                     ppi_threshold: parseFloat(ppiThresholdInput.value),
                     conversion_factor: parseFloat(conversionFactorInput.value),
                     secret_key: secretKeyInput.value
                 };
+
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/update-settings`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload),
                     });
+
                     const result = await response.json();
                     if (!response.ok) throw new Error(result.detail || '發生未知錯誤');
+                    
                     messageEl.textContent = '✅ 設定已成功更新！';
                     messageEl.className = 'mt-4 text-center text-green-600';
+
                 } catch (error) {
                     messageEl.textContent = `❌ 更新失敗: ${error.message}`;
                     messageEl.className = 'mt-4 text-center text-red-600';
