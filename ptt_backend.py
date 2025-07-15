@@ -10,11 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, Float, DateTime, desc, String, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
 
 # --- Pydantic Models for Data Validation ---
+# 用於驗證從後台管理頁面傳來的數據格式
 class SettingsUpdate(BaseModel):
     base_discount: float
     ppi_threshold: float
@@ -22,7 +23,10 @@ class SettingsUpdate(BaseModel):
     secret_key: str
 
 # --- FastAPI App & CORS ---
+# 初始化 FastAPI 應用程式
 app = FastAPI()
+
+# 設定 CORS 中介層，允許所有來源的請求，以解決跨來源問題
 origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -33,17 +37,21 @@ app.add_middleware(
 )
 
 # --- Database Setup ---
+# 從環境變數讀取資料庫連線網址和管理員密碼
 DATABASE_URL = os.environ.get('DATABASE_URL')
 ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
+
+# 初始化資料庫相關變數
 engine = None
 SessionLocal = None
 Base = declarative_base()
-db_ready = False
+db_ready = False # 用於檢查資料庫是否已就緒的全域標誌
 
+# --- SQLAlchemy Models (資料庫表格定義) ---
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     ppi = Column(Float, index=True)
 
 class DiscountSetting(Base):
@@ -60,13 +68,16 @@ def initialize_database():
     
     db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     try:
+        # 強制使用 SSL 加密連線
         engine = create_engine(db_url_for_sqlalchemy, pool_pre_ping=True, connect_args={"sslmode": "require"})
         with engine.connect() as connection:
             print("[成功] 資料庫連接成功！")
+        
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
 
+        # 初始化預設的折扣設定值
         db = SessionLocal()
         try:
             default_settings = {
@@ -149,26 +160,23 @@ async def deep_scrape_ppi():
         return None
 
 async def scrape_article(page, url: str):
-    """[FIX] 為單一文章的爬取加入重試機制並優化等待條件"""
     max_retries = 2
     for attempt in range(max_retries):
         try:
-            # 使用 networkidle 等待頁面更穩定
             await page.goto(url, wait_until='networkidle', timeout=20000)
             article_soup = BeautifulSoup(await page.content(), 'html.parser')
             pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
             boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
-            print(f"[成功] 已分析內頁: {url}") # [NEW] 加入成功日誌
-            return len(pushes), len(boos) # 成功後直接回傳結果
+            print(f"[成功] 已分析內頁: {url}")
+            return len(pushes), len(boos)
         except Exception as e:
             print(f"[警告] 爬取內頁 {url} 失敗 (第 {attempt + 1}/{max_retries} 次嘗試): {e}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(random.uniform(1, 3)) # 等待 1-3 秒後重試
+                await asyncio.sleep(random.uniform(1, 3))
             else:
                 print(f"[錯誤] 內頁 {url} 達到最大重試次數，放棄。")
-                return 0, 0 # 重試失敗後回傳 0
+                return 0, 0
     return 0, 0
-
 
 # --- Background Task ---
 async def scrape_and_save_periodically():
@@ -227,7 +235,7 @@ def get_current_discount():
         conversion_factor = settings.get("conversion_factor", 0.5)
         discount_cap = settings.get("discount_cap", 25.0)
 
-        start_time = datetime.utcnow() - timedelta(minutes=15)
+        start_time = datetime.now(timezone.utc) - timedelta(minutes=15)
         avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
         
         ppi_for_calculation = avg_ppi_query if avg_ppi_query is not None else 0.0
@@ -260,14 +268,14 @@ def get_history(timescale: str = "realtime"):
     db = SessionLocal()
     try:
         if timescale == "realtime":
-             start_time = datetime.utcnow() - timedelta(hours=1)
+             start_time = datetime.now(timezone.utc) - timedelta(hours=1)
              records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= start_time).order_by(SentimentRecord.timestamp.asc()).all()
-             return [{"timestamp": r.timestamp.isoformat() + "Z", "ppi": r.ppi} for r in records]
+             return [{"timestamp": r.timestamp.isoformat(), "ppi": r.ppi} for r in records]
         
         interval_map = {"30m": '30 minutes', "1h": '1 hour'}
         if timescale not in interval_map: return {"error": "Invalid timescale"}
         
-        start_time_map = {"30m": datetime.utcnow() - timedelta(hours=24), "1h": datetime.utcnow() - timedelta(days=3)}
+        start_time_map = {"30m": datetime.now(timezone.utc) - timedelta(hours=24), "1h": datetime.now(timezone.utc) - timedelta(days=3)}
         start_time = start_time_map[timescale]
         interval = interval_map[timescale]
 
@@ -276,7 +284,7 @@ def get_history(timescale: str = "realtime"):
             func.avg(SentimentRecord.ppi).label('avg_pni')
         ).filter(SentimentRecord.timestamp >= start_time).group_by('bucket').order_by('bucket')
         
-        return [{"timestamp": r.bucket.isoformat() + "Z", "ppi": r.avg_pni} for r in query.all()]
+        return [{"timestamp": r.bucket.isoformat(), "ppi": r.avg_pni} for r in query.all()]
     finally:
         db.close()
 
