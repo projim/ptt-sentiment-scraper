@@ -1,5 +1,5 @@
 import asyncio
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page, BrowserContext
 from bs4 import BeautifulSoup
 import json
 import time
@@ -15,7 +15,6 @@ from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
 
 # --- Pydantic Models for Data Validation ---
-# 用於驗證從後台管理頁面傳來的數據格式
 class SettingsUpdate(BaseModel):
     base_discount: float
     ppi_threshold: float
@@ -23,10 +22,7 @@ class SettingsUpdate(BaseModel):
     secret_key: str
 
 # --- FastAPI App & CORS ---
-# 初始化 FastAPI 應用程式
 app = FastAPI()
-
-# 設定 CORS 中介層，允許所有來源的請求，以解決跨來源問題
 origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -37,21 +33,17 @@ app.add_middleware(
 )
 
 # --- Database Setup ---
-# 從環境變數讀取資料庫連線網址和管理員密碼
 DATABASE_URL = os.environ.get('DATABASE_URL')
 ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
-
-# 初始化資料庫相關變數
 engine = None
 SessionLocal = None
 Base = declarative_base()
-db_ready = False # 用於檢查資料庫是否已就緒的全域標誌
+db_ready = False
 
-# --- SQLAlchemy Models (資料庫表格定義) ---
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
     ppi = Column(Float, index=True)
 
 class DiscountSetting(Base):
@@ -68,16 +60,13 @@ def initialize_database():
     
     db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     try:
-        # 強制使用 SSL 加密連線
         engine = create_engine(db_url_for_sqlalchemy, pool_pre_ping=True, connect_args={"sslmode": "require"})
         with engine.connect() as connection:
             print("[成功] 資料庫連接成功！")
-        
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
 
-        # 初始化預設的折扣設定值
         db = SessionLocal()
         try:
             default_settings = {
@@ -114,7 +103,9 @@ async def deep_scrape_ppi():
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(user_agent=random.choice(USER_AGENTS))
+            # [FIX] 建立一個共用的瀏覽器情境
+            context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+            page = await context.new_page()
             
             print("[爬蟲] 正在前往 PTT 八卦版...")
             await page.goto(GOSSIPING_BOARD_URL, wait_until='domcontentloaded', timeout=60000)
@@ -129,6 +120,7 @@ async def deep_scrape_ppi():
                 print("[爬蟲] 未偵測到年齡確認按鈕或已超時，直接繼續。")
 
             content = await page.content()
+            await page.close() # 關閉用於列表頁的分頁
             soup = BeautifulSoup(content, "html.parser")
             
             articles = soup.select("div.r-ent")
@@ -141,7 +133,8 @@ async def deep_scrape_ppi():
 
             total_push, total_boo = 0, 0
             
-            scrape_tasks = [scrape_article(page, url) for url in article_urls[:10]]
+            # [FIX] 將共用的 context 傳遞給每個任務
+            scrape_tasks = [scrape_article(context, url) for url in article_urls[:10]]
             results = await asyncio.gather(*scrape_tasks)
             
             for push, boo in results:
@@ -159,7 +152,9 @@ async def deep_scrape_ppi():
         print(f"[重大錯誤] Playwright 爬取時發生未知錯誤: {e}")
         return None
 
-async def scrape_article(page, url: str):
+async def scrape_article(context: BrowserContext, url: str):
+    """[FIX] 每個任務都使用自己的獨立分頁"""
+    page = await context.new_page()
     max_retries = 2
     for attempt in range(max_retries):
         try:
@@ -167,15 +162,20 @@ async def scrape_article(page, url: str):
             article_soup = BeautifulSoup(await page.content(), 'html.parser')
             pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
             boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
-            print(f"[成功] 已分析內頁: {url}")
-            return len(pushes), len(boos)
+            push_count = len(pushes)
+            boo_count = len(boos)
+            print(f"[成功] 已分析內頁: {url} - 推: {push_count}, 噓: {boo_count}")
+            await page.close()
+            return push_count, boo_count
         except Exception as e:
             print(f"[警告] 爬取內頁 {url} 失敗 (第 {attempt + 1}/{max_retries} 次嘗試): {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(random.uniform(1, 3))
             else:
                 print(f"[錯誤] 內頁 {url} 達到最大重試次數，放棄。")
+                await page.close()
                 return 0, 0
+    await page.close()
     return 0, 0
 
 # --- Background Task ---
@@ -216,6 +216,7 @@ async def startup_event():
     asyncio.create_task(scrape_and_save_periodically())
     print("伺服器已啟動，背景任務將在後台進行初始化。")
 
+# ... (所有 API 端點，如 /api/current-discount, /api/history 等，都保持不變) ...
 @app.get("/")
 def read_root():
     return {"status": "PTT Discount Engine API is alive"}
