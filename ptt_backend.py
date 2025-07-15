@@ -15,7 +15,6 @@ from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
 
 # --- Pydantic Models for Data Validation ---
-# 用於驗證從後台管理頁面傳來的數據格式
 class SettingsUpdate(BaseModel):
     base_discount: float
     ppi_threshold: float
@@ -23,10 +22,7 @@ class SettingsUpdate(BaseModel):
     secret_key: str
 
 # --- FastAPI App & CORS ---
-# 初始化 FastAPI 應用程式
 app = FastAPI()
-
-# 設定 CORS 中介層，允許所有來源的請求，以解決跨來源問題
 origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -37,21 +33,18 @@ app.add_middleware(
 )
 
 # --- Database Setup ---
-# 從環境變數讀取資料庫連線網址和管理員密碼
 DATABASE_URL = os.environ.get('DATABASE_URL')
 ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET_KEY', 'default_secret_key')
-
-# 初始化資料庫相關變數
 engine = None
 SessionLocal = None
 Base = declarative_base()
-db_ready = False # 用於檢查資料庫是否已就緒的全域標誌
+db_ready = False
 
-# --- SQLAlchemy Models (資料庫表格定義) ---
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    # [FIX] 確保 timestamp 欄位有時區資訊且不可為空
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     ppi = Column(Float, index=True)
 
 class DiscountSetting(Base):
@@ -68,16 +61,13 @@ def initialize_database():
     
     db_url_for_sqlalchemy = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     try:
-        # 強制使用 SSL 加密連線
         engine = create_engine(db_url_for_sqlalchemy, pool_pre_ping=True, connect_args={"sslmode": "require"})
         with engine.connect() as connection:
             print("[成功] 資料庫連接成功！")
-        
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         Base.metadata.create_all(bind=engine)
         print("資料庫表格檢查完畢。")
 
-        # 初始化預設的折扣設定值
         db = SessionLocal()
         try:
             default_settings = {
@@ -162,18 +152,36 @@ async def deep_scrape_ppi():
         return None
 
 async def scrape_article(context: BrowserContext, url: str):
-    """每個任務都使用自己的獨立分頁，並模擬滾動"""
+    """每個任務都使用自己的獨立分頁，並模擬滾動以載入所有留言"""
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until='networkidle', timeout=20000)
-        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-        await page.wait_for_timeout(500)
+        await page.goto(url, wait_until='domcontentloaded', timeout=20000)
+        
+        # [FIX] 模擬滾動到底部以載入所有留言
+        last_height = await page.evaluate('document.body.scrollHeight')
+        while True:
+            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+            await page.wait_for_timeout(500) # 等待半秒讓動態內容載入
+            new_height = await page.evaluate('document.body.scrollHeight')
+            if new_height == last_height:
+                break
+            last_height = new_height
 
         article_soup = BeautifulSoup(await page.content(), 'html.parser')
-        pushes = article_soup.select('div.push > span.push-tag', string=lambda text: '推' in text)
-        boos = article_soup.select('div.push > span.push-tag', string=lambda text: '噓' in text)
-        push_count = len(pushes)
-        boo_count = len(boos)
+        
+        push_count = 0
+        boo_count = 0
+        
+        all_pushes = article_soup.select('div.push')
+        for push_div in all_pushes:
+            tag_span = push_div.select_one('span.push-tag')
+            if tag_span and tag_span.string:
+                tag_text = tag_span.string.strip()
+                if tag_text == '推':
+                    push_count += 1
+                elif tag_text == '噓':
+                    boo_count += 1
+        
         print(f"[成功] 已分析內頁: {url} - 推: {push_count}, 噓: {boo_count}")
         await page.close()
         return push_count, boo_count
@@ -200,7 +208,8 @@ async def scrape_and_save_periodically():
             if ppi is not None and SessionLocal:
                 db = SessionLocal()
                 try:
-                    new_record = SentimentRecord(ppi=ppi)
+                    # [FIX] 寫入資料庫時，明確地傳入帶有時區的時間戳記
+                    new_record = SentimentRecord(ppi=ppi, timestamp=datetime.now(timezone.utc))
                     db.add(new_record)
                     db.commit()
                     print(f"PPI {ppi:.2f}% 已成功存入資料庫。")
