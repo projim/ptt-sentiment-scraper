@@ -52,8 +52,11 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            // [FIX] 請將此處的網址，換成您在 "Railway" 上的真實公開網址！
+            // =================================================================
+            // [!!!] 最關鍵的修正點 [!!!]
+            // 請將此處的網址，換成您在 "Railway" 上的真實公開網址！
             // 例如：https://my-cool-app.up.railway.app
+            // =================================================================
             const API_BASE_URL = "https://ptt-gossiping-live-production.up.railway.app"; 
             
             const form = document.getElementById('settings-form');
@@ -70,11 +73,18 @@
             async function loadCurrentSettings() {
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/get-settings`);
+                    
                     if (!response.ok) {
                         let errorDetail = `HTTP 狀態碼: ${response.status}`;
-                        try { const errorData = await response.json(); errorDetail += ` - ${errorData.detail || JSON.stringify(errorData)}`; } catch (e) { errorDetail += ` - ${response.statusText}`; }
+                        try {
+                            const errorData = await response.json();
+                            errorDetail += ` - ${errorData.detail || JSON.stringify(errorData)}`;
+                        } catch (e) {
+                            errorDetail += ` - ${response.statusText}`;
+                        }
                         throw new Error(`無法獲取當前設定. ${errorDetail}`);
                     }
+
                     const settings = await response.json();
 
                     baseDiscountInput.value = settings.base_discount || 5.0;
@@ -84,7 +94,7 @@
                     loadingEl.style.display = 'none';
                     form.style.display = 'block';
                 } catch (error) {
-                    loadingEl.textContent = `獲取設定失敗：${error.message}`;
+                    loadingEl.innerHTML = `獲取設定失敗：<br><span class="text-sm text-gray-600">${error.message}</span>`;
                     console.error(error);
                 }
             }
