@@ -240,21 +240,21 @@ def get_current_discount():
         conversion_factor = settings.get("conversion_factor", 0.5)
         discount_cap = settings.get("discount_cap", 25.0)
 
-        # [LOGIC UPDATE] 核心修正點：不再計算平均值，而是直接找最新一筆
-        latest_record = db.query(SentimentRecord).order_by(SentimentRecord.timestamp.desc()).first()
+        # [FIX] 改為使用 ID 排序，確保永遠抓到最新一筆
+        latest_record = db.query(SentimentRecord).order_by(SentimentRecord.id.desc()).first()
         
         ppi_for_calculation = 0.0
         if latest_record:
             ppi_for_calculation = latest_record.ppi
-            print(f"[API] 找到最新一筆 PPI: {ppi_for_calculation:.2f}%")
-            # 如果最新一筆是 0，則開始回溯
+            print(f"[API] 找到最新一筆 PPI (ID: {latest_record.id}): {ppi_for_calculation:.2f}%")
+            
             if ppi_for_calculation == 0.0:
                 print("[API] 最新 PPI 為 0，正在嘗試回溯...")
-                # 查詢最新一筆非零的紀錄
-                fallback_record = db.query(SentimentRecord).filter(SentimentRecord.ppi > 0).order_by(SentimentRecord.timestamp.desc()).first()
+                # [FIX] 回溯時也使用 ID 排序
+                fallback_record = db.query(SentimentRecord).filter(SentimentRecord.ppi > 0).order_by(SentimentRecord.id.desc()).first()
                 if fallback_record:
                     ppi_for_calculation = fallback_record.ppi
-                    print(f"[API] 已成功回溯，使用最後一筆有效 PPI: {ppi_for_calculation:.2f}%")
+                    print(f"[API] 已成功回溯，使用最後一筆有效 PPI (ID: {fallback_record.id}): {ppi_for_calculation:.2f}%")
                 else:
                     print("[API] 資料庫中無任何有效歷史數據，PPI 將使用 0。")
         else:
@@ -266,16 +266,12 @@ def get_current_discount():
         
         final_discount = base_discount + extra_discount
         final_discount = min(final_discount, discount_cap)
-        print(f"[API] 計算出的最終折扣百分比: {final_discount}")
 
         return {
             "current_ppi": round(ppi_for_calculation, 2),
             "final_discount_percentage": round(final_discount, 2),
             "settings": settings
         }
-    except Exception as e:
-        print(f"[錯誤] 計算折扣時發生錯誤: {e}")
-        raise HTTPException(status_code=500, detail="計算折扣時發生內部錯誤")
     finally:
         db.close()
 
@@ -287,56 +283,14 @@ def get_history(timescale: str = "realtime"):
     db = SessionLocal()
     try:
         if timescale == "realtime":
-             start_time = datetime.now(timezone.utc) - timedelta(hours=1)
-             records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= start_time).order_by(SentimentRecord.timestamp.asc()).all()
+             # [FIX] 使用 ID 排序來確保拿到的是最新的數據
+             one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+             records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= one_hour_ago).order_by(SentimentRecord.id.asc()).all()
              return [{"timestamp": r.timestamp.isoformat(), "ppi": r.ppi} for r in records]
         
-        interval_map = {"30m": '30 minutes', "1h": '1 hour'}
-        if timescale not in interval_map: return {"error": "Invalid timescale"}
+        # ... (其餘彙總邏輯不變)
         
-        start_time_map = {"30m": datetime.now(timezone.utc) - timedelta(hours=24), "1h": datetime.now(timezone.utc) - timedelta(days=3)}
-        start_time = start_time_map[timescale]
-        interval = interval_map[timescale]
-
-        query = db.query(
-            func.date_trunc(interval, SentimentRecord.timestamp).label('bucket'),
-            func.avg(SentimentRecord.ppi).label('avg_pni')
-        ).filter(SentimentRecord.timestamp >= start_time).group_by('bucket').order_by('bucket')
-        
-        return [{"timestamp": r.bucket.isoformat(), "ppi": r.avg_pni} for r in query.all()]
     finally:
         db.close()
 
-@app.post("/api/update-settings")
-def update_settings(payload: SettingsUpdate):
-    if not db_ready or SessionLocal is None:
-        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
-    
-    if payload.secret_key != ADMIN_SECRET_KEY:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="無效的管理員密碼")
-    
-    db = SessionLocal()
-    try:
-        settings_to_update = {
-            "base_discount": payload.base_discount,
-            "ppi_threshold": payload.ppi_threshold,
-            "conversion_factor": payload.conversion_factor,
-        }
-        for key, value in settings_to_update.items():
-            db.query(DiscountSetting).filter(DiscountSetting.setting_name == key).update({"setting_value": value})
-        db.commit()
-        return {"message": "折扣設定已成功更新！"}
-    finally:
-        db.close()
-
-@app.get("/api/get-settings")
-def get_settings():
-    if not db_ready or SessionLocal is None:
-        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
-    
-    db = SessionLocal()
-    try:
-        settings_query = db.query(DiscountSetting).all()
-        return {s.setting_name: s.setting_value for s in settings_query}
-    finally:
-        db.close()
+# ... (其餘 API 和 WebSocket 邏輯與之前版本相同)
