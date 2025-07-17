@@ -1,5 +1,5 @@
 import asyncio
-from playwright.async_api import async_playwright, Page, BrowserContext
+import httpx
 from bs4 import BeautifulSoup
 import json
 import time
@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
+from playwright.async_api import async_playwright, Page, BrowserContext
 
 # --- Pydantic Models for Data Validation ---
 class SettingsUpdate(BaseModel):
@@ -43,8 +44,7 @@ db_ready = False
 class SentimentRecord(Base):
     __tablename__ = "sentiment_records"
     id = Column(Integer, primary_key=True, index=True)
-    # [FIX] 確保 timestamp 欄位有時區資訊且不可為空
-    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
     ppi = Column(Float, index=True)
 
 class DiscountSetting(Base):
@@ -152,20 +152,12 @@ async def deep_scrape_ppi():
         return None
 
 async def scrape_article(context: BrowserContext, url: str):
-    """每個任務都使用自己的獨立分頁，並模擬滾動以載入所有留言"""
+    """每個任務都使用自己的獨立分頁，並模擬滾動"""
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=20000)
-        
-        # [FIX] 模擬滾動到底部以載入所有留言
-        last_height = await page.evaluate('document.body.scrollHeight')
-        while True:
-            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            await page.wait_for_timeout(500) # 等待半秒讓動態內容載入
-            new_height = await page.evaluate('document.body.scrollHeight')
-            if new_height == last_height:
-                break
-            last_height = new_height
+        await page.goto(url, wait_until='networkidle', timeout=20000)
+        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+        await page.wait_for_timeout(500)
 
         article_soup = BeautifulSoup(await page.content(), 'html.parser')
         
@@ -208,7 +200,6 @@ async def scrape_and_save_periodically():
             if ppi is not None and SessionLocal:
                 db = SessionLocal()
                 try:
-                    # [FIX] 寫入資料庫時，明確地傳入帶有時區的時間戳記
                     new_record = SentimentRecord(ppi=ppi, timestamp=datetime.now(timezone.utc))
                     db.add(new_record)
                     db.commit()
@@ -240,6 +231,7 @@ def get_current_discount():
     
     db = SessionLocal()
     try:
+        print("[API] /api/current-discount 被呼叫")
         settings_query = db.query(DiscountSetting).all()
         settings = {s.setting_name: s.setting_value for s in settings_query}
         
@@ -248,15 +240,25 @@ def get_current_discount():
         conversion_factor = settings.get("conversion_factor", 0.5)
         discount_cap = settings.get("discount_cap", 25.0)
 
-        start_time = datetime.now(timezone.utc) - timedelta(minutes=15)
-        avg_ppi_query = db.query(func.avg(SentimentRecord.ppi)).filter(SentimentRecord.timestamp >= start_time).scalar()
+        # [LOGIC UPDATE] 核心修正點：不再計算平均值，而是直接找最新一筆
+        latest_record = db.query(SentimentRecord).order_by(SentimentRecord.timestamp.desc()).first()
         
-        ppi_for_calculation = avg_ppi_query if avg_ppi_query is not None else 0.0
-
-        if ppi_for_calculation == 0.0:
-            last_valid_ppi_record = db.query(SentimentRecord.ppi).filter(SentimentRecord.ppi > 0).order_by(SentimentRecord.timestamp.desc()).first()
-            if last_valid_ppi_record:
-                ppi_for_calculation = last_valid_ppi_record[0]
+        ppi_for_calculation = 0.0
+        if latest_record:
+            ppi_for_calculation = latest_record.ppi
+            print(f"[API] 找到最新一筆 PPI: {ppi_for_calculation:.2f}%")
+            # 如果最新一筆是 0，則開始回溯
+            if ppi_for_calculation == 0.0:
+                print("[API] 最新 PPI 為 0，正在嘗試回溯...")
+                # 查詢最新一筆非零的紀錄
+                fallback_record = db.query(SentimentRecord).filter(SentimentRecord.ppi > 0).order_by(SentimentRecord.timestamp.desc()).first()
+                if fallback_record:
+                    ppi_for_calculation = fallback_record.ppi
+                    print(f"[API] 已成功回溯，使用最後一筆有效 PPI: {ppi_for_calculation:.2f}%")
+                else:
+                    print("[API] 資料庫中無任何有效歷史數據，PPI 將使用 0。")
+        else:
+            print("[API] 資料庫中尚無任何數據，PPI 將使用 0。")
 
         extra_discount = 0
         if ppi_for_calculation < ppi_threshold:
@@ -264,12 +266,16 @@ def get_current_discount():
         
         final_discount = base_discount + extra_discount
         final_discount = min(final_discount, discount_cap)
+        print(f"[API] 計算出的最終折扣百分比: {final_discount}")
 
         return {
             "current_ppi": round(ppi_for_calculation, 2),
             "final_discount_percentage": round(final_discount, 2),
             "settings": settings
         }
+    except Exception as e:
+        print(f"[錯誤] 計算折扣時發生錯誤: {e}")
+        raise HTTPException(status_code=500, detail="計算折扣時發生內部錯誤")
     finally:
         db.close()
 
