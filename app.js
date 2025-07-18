@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // 檢查函式庫
+    // 檢查所有必要的函式庫是否都已成功載入
     if (typeof Chart === 'undefined' || typeof JsBarcode === 'undefined' || typeof window.dateFns === 'undefined') {
         console.error("Fatal Error: A required library failed to load.");
         document.getElementById('connection-status').innerHTML = "關鍵函式庫載入失敗，請檢查 libs 資料夾或網路連線並刷新頁面。";
@@ -121,7 +121,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function fetchDiscountAndUpdate() {
+    // [UPDATE] 全新的折扣獲取與 UI 更新函式
+    async function fetchAndUpdate() {
         try {
             const response = await fetch(`${API_BASE_URL}/api/current-discount`);
             if (!response.ok) throw new Error(`Network response was not ok (${response.status})`);
@@ -130,12 +131,26 @@ document.addEventListener('DOMContentLoaded', () => {
             
             currentDiscountData = data;
             generateCodeBtn.disabled = false;
-            updateUIDisplay(data);
-            startCountdown(data.valid_until);
 
+            // 更新 UI 顯示
+            const { current_ppi, final_discount_percentage, settings } = data;
+            const discountValue = (100 - final_discount_percentage) / 10;
+            discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
+            ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
+            formulaDisplayEl.textContent = `${settings.base_discount}% + (${settings.ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${settings.conversion_factor}`;
+            
+            // 將最新的折扣數據點加入圖表
+            const chartData = sentimentChart.data.datasets[0].data;
+            chartData.push({ x: new Date(), y: final_discount_percentage });
+            if (chartData.length > 60) chartData.shift();
+            sentimentChart.update('quiet');
+
+            // 更新狀態並啟動倒數計時
             connectionStatusEl.textContent = `連線正常 | 上次更新：${new Date().toLocaleTimeString('zh-TW')}`;
             connectionStatusEl.classList.remove('text-yellow-400', 'text-red-500');
             connectionStatusEl.classList.add('text-green-400');
+            
+            startCountdown(data.valid_until);
 
         } catch (error) {
             console.error('獲取折扣失敗:', error);
@@ -144,23 +159,12 @@ document.addEventListener('DOMContentLoaded', () => {
             connectionStatusEl.classList.add('text-red-500');
             discountDisplayEl.textContent = "N/A";
             generateCodeBtn.disabled = true;
-            setTimeout(fetchDiscountAndUpdate, 10000);
+            // 如果失敗，10秒後自動重試
+            setTimeout(fetchAndUpdate, 10000);
         }
     }
-
-    function updateUIDisplay(data) {
-        const { current_ppi, final_discount_percentage, settings } = data;
-        const discountValue = (100 - final_discount_percentage) / 10;
-        discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
-        ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
-        formulaDisplayEl.textContent = `${settings.base_discount}% + (${settings.ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${settings.conversion_factor}`;
-        
-        const chartData = sentimentChart.data.datasets[0].data;
-        chartData.push({ x: new Date(), y: final_discount_percentage });
-        if (chartData.length > 60) chartData.shift();
-        sentimentChart.update('quiet');
-    }
     
+    // [UPDATE] 倒數計時器現在由伺服器時間驅動
     function startCountdown(validUntilTimestamp) {
         clearInterval(countdownInterval);
         countdownTextEl.style.display = 'block';
@@ -168,15 +172,16 @@ document.addEventListener('DOMContentLoaded', () => {
         function updateTimer() {
             const now = Math.floor(Date.now() / 1000);
             const secondsRemaining = Math.max(0, Math.floor(validUntilTimestamp - now));
+            
             countdownTimerEl.textContent = secondsRemaining;
 
             if (secondsRemaining <= 0) {
                 clearInterval(countdownInterval);
                 countdownTextEl.style.display = 'none';
-                fetchDiscountAndUpdate();
+                fetchAndUpdate(); // 當倒數結束時，立即獲取下一個折扣
             }
         }
-        updateTimer();
+        updateTimer(); // 立即更新一次
         countdownInterval = setInterval(updateTimer, 1000);
     }
     
@@ -196,12 +201,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
 
+    // [UPDATE] 簡化後的啟動流程
     async function initialize() {
         sentimentChart = new Chart(ctx, chartConfig);
         await initializeChartWithHistory();
-        await fetchDiscountAndUpdate();
+        
+        // 啟動主更新迴圈
+        fetchAndUpdate(); 
+
         generateCodeBtn.addEventListener('click', showBarcode);
-        closeModalBtn.addEventListener('click', () => { codeModal.classList.add('hidden'); });
+        closeModalBtn.addEventListener('click', () => {
+            codeModal.classList.add('hidden');
+        });
     }
 
     initialize();
