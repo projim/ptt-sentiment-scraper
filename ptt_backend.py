@@ -23,12 +23,14 @@ class SettingsUpdate(BaseModel):
 
 # --- FastAPI App & CORS ---
 app = FastAPI()
+
+# [FIX] 確保 CORS 中介層能正確處理所有請求
 origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -255,14 +257,10 @@ def get_current_discount():
         final_discount = base_discount + extra_discount
         final_discount = min(final_discount, discount_cap)
 
-        # [FIX] 還原計算並回傳有效期限的邏輯
-        valid_until_timestamp = time.time() + 60
-
         return {
             "current_ppi": round(ppi_for_calculation, 2),
             "final_discount_percentage": round(final_discount, 2),
-            "settings": settings,
-            "valid_until": valid_until_timestamp
+            "settings": settings
         }
     finally:
         db.close()
