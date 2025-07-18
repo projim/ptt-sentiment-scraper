@@ -26,8 +26,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let countdownInterval;
     let currentDiscountData = null;
 
-    // [FIX] 請務必將此處的網址，換成您在 "Railway" 上的真實公開網址！
-    const API_BASE_URL = "https://ptt-gossiping-live-production.up.railway.app"; 
+    const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Railway 上的真實服務名稱
+    const API_BASE_URL = `https://${serviceName}.up.railway.app`;
     
     const chartConfig = {
         type: 'line',
@@ -94,22 +94,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function initializeChartWithHistory() {
         try {
-            connectionStatusEl.textContent = "正在載入歷史數據...";
-            if (!currentDiscountData) {
-                const response = await fetch(`${API_BASE_URL}/api/current-discount`);
-                if (!response.ok) throw new Error('無法獲取折扣設定來初始化圖表');
-                currentDiscountData = await response.json();
-                if (currentDiscountData.error) throw new Error(currentDiscountData.error);
-            }
-
             const response = await fetch(`${API_BASE_URL}/api/history?timescale=realtime`);
             if (!response.ok) throw new Error('無法獲取歷史數據');
             const history = await response.json();
             if(history.error) throw new Error(history.error);
 
+            // 確保我們有折扣設定可以用來計算
+            const settings = currentDiscountData ? currentDiscountData.settings : {};
             const initialData = history.map(p => ({ 
                 x: new Date(p.timestamp), 
-                y: calculateDiscountFromPpi(p.ppi, currentDiscountData.settings) 
+                y: calculateDiscountFromPpi(p.ppi, settings) 
             }));
             
             sentimentChart.data.datasets[0].data = initialData;
@@ -117,11 +111,10 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log(`已成功載入 ${initialData.length} 筆歷史折扣數據。`);
         } catch (error) {
             console.error("初始化圖表歷史數據失敗:", error);
-            connectionStatusEl.textContent = "載入歷史數據失敗。";
+            // 即使失敗，也不影響主流程
         }
     }
 
-    // [UPDATE] 全新的折扣獲取與 UI 更新函式
     async function fetchAndUpdate() {
         try {
             const response = await fetch(`${API_BASE_URL}/api/current-discount`);
@@ -129,28 +122,21 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             if (data.error) throw new Error(data.error);
             
+            const isFirstLoad = !currentDiscountData;
             currentDiscountData = data;
             generateCodeBtn.disabled = false;
 
-            // 更新 UI 顯示
-            const { current_ppi, final_discount_percentage, settings } = data;
-            const discountValue = (100 - final_discount_percentage) / 10;
-            discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
-            ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
-            formulaDisplayEl.textContent = `${settings.base_discount}% + (${settings.ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${settings.conversion_factor}`;
-            
-            // 將最新的折扣數據點加入圖表
-            const chartData = sentimentChart.data.datasets[0].data;
-            chartData.push({ x: new Date(), y: final_discount_percentage });
-            if (chartData.length > 60) chartData.shift();
-            sentimentChart.update('quiet');
+            updateUIDisplay(data);
+            startCountdown(data.valid_until);
 
-            // 更新狀態並啟動倒數計時
             connectionStatusEl.textContent = `連線正常 | 上次更新：${new Date().toLocaleTimeString('zh-TW')}`;
             connectionStatusEl.classList.remove('text-yellow-400', 'text-red-500');
             connectionStatusEl.classList.add('text-green-400');
-            
-            startCountdown(data.valid_until);
+
+            // [FIX] 只有在第一次成功載入時，才去更新歷史圖表
+            if (isFirstLoad) {
+                await initializeChartWithHistory();
+            }
 
         } catch (error) {
             console.error('獲取折扣失敗:', error);
@@ -159,12 +145,26 @@ document.addEventListener('DOMContentLoaded', () => {
             connectionStatusEl.classList.add('text-red-500');
             discountDisplayEl.textContent = "N/A";
             generateCodeBtn.disabled = true;
-            // 如果失敗，10秒後自動重試
             setTimeout(fetchAndUpdate, 10000);
         }
     }
+
+    function updateUIDisplay(data) {
+        const { current_ppi, final_discount_percentage, settings } = data;
+        const discountValue = (100 - final_discount_percentage) / 10;
+        discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
+        ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
+        formulaDisplayEl.textContent = `${settings.base_discount}% + (${settings.ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${settings.conversion_factor}`;
+        
+        const chartData = sentimentChart.data.datasets[0].data;
+        // 如果圖表是空的 (第一次載入)，則不主動添加點，等待歷史數據填入
+        if (chartData.length > 0) {
+            chartData.push({ x: new Date(), y: final_discount_percentage });
+            if (chartData.length > 60) chartData.shift();
+            sentimentChart.update('quiet');
+        }
+    }
     
-    // [UPDATE] 倒數計時器現在由伺服器時間驅動
     function startCountdown(validUntilTimestamp) {
         clearInterval(countdownInterval);
         countdownTextEl.style.display = 'block';
@@ -178,10 +178,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (secondsRemaining <= 0) {
                 clearInterval(countdownInterval);
                 countdownTextEl.style.display = 'none';
-                fetchAndUpdate(); // 當倒數結束時，立即獲取下一個折扣
+                fetchAndUpdate();
             }
         }
-        updateTimer(); // 立即更新一次
+        updateTimer();
         countdownInterval = setInterval(updateTimer, 1000);
     }
     
@@ -201,14 +201,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
 
-    // [UPDATE] 簡化後的啟動流程
-    async function initialize() {
+    function initialize() {
         sentimentChart = new Chart(ctx, chartConfig);
-        await initializeChartWithHistory();
-        
-        // 啟動主更新迴圈
         fetchAndUpdate(); 
-
         generateCodeBtn.addEventListener('click', showBarcode);
         closeModalBtn.addEventListener('click', () => {
             codeModal.classList.add('hidden');
