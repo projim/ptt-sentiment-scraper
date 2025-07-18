@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // 檢查所有必要的函式庫是否都已成功載入
+    // 檢查所有必要的函式庫是否都已成功載入  V2.0
     if (typeof Chart === 'undefined' || typeof JsBarcode === 'undefined' || typeof window.dateFns === 'undefined') {
         console.error("Fatal Error: A required library failed to load.");
         document.getElementById('connection-status').innerHTML = "關鍵函式庫載入失敗，請檢查 libs 資料夾或網路連線並刷新頁面。";
