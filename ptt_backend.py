@@ -255,10 +255,14 @@ def get_current_discount():
         final_discount = base_discount + extra_discount
         final_discount = min(final_discount, discount_cap)
 
+        # [FIX] 還原計算並回傳有效期限的邏輯
+        valid_until_timestamp = time.time() + 60
+
         return {
             "current_ppi": round(ppi_for_calculation, 2),
             "final_discount_percentage": round(final_discount, 2),
-            "settings": settings
+            "settings": settings,
+            "valid_until": valid_until_timestamp
         }
     finally:
         db.close()
