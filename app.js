@@ -23,11 +23,13 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 應用程式狀態
     let sentimentChart;
+    let mainInterval;
     let countdownInterval;
     let currentDiscountData = null;
 
-    const serviceName = "ptt-gossiping-live"; // 請務必換成您在 Railway 上的真實服務名稱
-    const API_BASE_URL = `https://${serviceName}.up.railway.app`;
+    // [FINAL FIX] 請將此處的網址，換成您在 "Railway" 上的真實公開網址！
+    // 例如：https://my-cool-app.up.railway.app
+    const API_BASE_URL = "https://ptt-gossiping-live-production.up.railway.app"; // <--- 請務必修改這裡！
     
     const chartConfig = {
         type: 'line',
@@ -87,6 +89,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // 在前端複製折扣計算邏輯，用於轉換歷史數據
     function calculateDiscountFromPpi(ppi, settings) {
         const { base_discount = 5.0, ppi_threshold = 70.0, conversion_factor = 0.5, discount_cap = 25.0 } = settings;
         const extra_discount = Math.max(0, (ppi_threshold - ppi) * conversion_factor);
@@ -94,6 +97,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return final_discount;
     }
 
+    // 獲取並預填歷史數據的函式
     async function initializeChartWithHistory() {
         try {
             connectionStatusEl.textContent = "正在載入歷史數據...";
@@ -113,6 +117,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 x: new Date(p.timestamp), 
                 y: calculateDiscountFromPpi(p.ppi, currentDiscountData.settings) 
             }));
+            
             sentimentChart.data.datasets[0].data = initialData;
             sentimentChart.update();
             console.log(`已成功載入 ${initialData.length} 筆歷史折扣數據。`);
@@ -122,40 +127,39 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // [UPDATE] 核心的數據獲取與動態輪詢函式
-    async function pollingLoop() {
+    // 簡化後的折扣獲取與 UI 更新函式
+    async function fetchAndUpdateDiscount() {
         try {
             const response = await fetch(`${API_BASE_URL}/api/current-discount`);
             if (!response.ok) throw new Error(`Network response was not ok (${response.status})`);
             const data = await response.json();
             if (data.error) throw new Error(data.error);
             
-            currentDiscountData = data;
+            currentDiscountData = data; // 更新全域的折扣數據
             generateCodeBtn.disabled = false;
+
+            // 更新主要的 UI 顯示
             updateUIDisplay(data);
             
-            // [NEW] 使用後端提供的秒數來啟動倒數和排程下一次請求
-            const secondsLeft = data.seconds_until_next_update;
-            startCountdown(secondsLeft);
-            
-            // 加上 2 秒的緩衝，確保在下一分鐘開始後才發出請求
-            const delay = (secondsLeft + 2) * 1000; 
-            console.log(`下一次 API 請求將在 ${delay / 1000} 秒後發送。`);
-            setTimeout(pollingLoop, delay);
+            // 將最新的折扣數據點加入圖表
+            const chartData = sentimentChart.data.datasets[0].data;
+            chartData.push({ x: new Date(), y: data.final_discount_percentage });
+            if (chartData.length > 60) chartData.shift();
+            sentimentChart.update('quiet');
 
+            // 更新狀態並啟動倒數計時
             connectionStatusEl.textContent = `連線正常 | 上次更新：${new Date().toLocaleTimeString('zh-TW')}`;
             connectionStatusEl.classList.remove('text-yellow-400', 'text-red-500');
             connectionStatusEl.classList.add('text-green-400');
+            startCountdown();
 
         } catch (error) {
             console.error('獲取折扣失敗:', error);
-            connectionStatusEl.textContent = "獲取失敗，將於 15 秒後重試...";
+            connectionStatusEl.textContent = "獲取失敗，將於下一分鐘重試...";
             connectionStatusEl.classList.remove('text-green-400', 'text-yellow-400');
             connectionStatusEl.classList.add('text-red-500');
             discountDisplayEl.textContent = "N/A";
             generateCodeBtn.disabled = true;
-            // 如果失敗，則在 15 秒後重試
-            setTimeout(pollingLoop, 15000);
         }
     }
 
@@ -165,27 +169,17 @@ document.addEventListener('DOMContentLoaded', () => {
         discountDisplayEl.textContent = `${discountValue.toFixed(1)} 折`;
         ppiDisplayEl.textContent = `${current_ppi.toFixed(2)} %`;
         formulaDisplayEl.textContent = `${settings.base_discount}% + (${settings.ppi_threshold}% - ${current_ppi.toFixed(1)}%) * ${settings.conversion_factor}`;
-        
-        const chartData = sentimentChart.data.datasets[0].data;
-        chartData.push({ x: new Date(), y: final_discount_percentage });
-        if (chartData.length > 60) chartData.shift();
-        sentimentChart.update('quiet');
     }
     
-    // [UPDATE] 倒數計時器現在由後端提供的秒數啟動
-    function startCountdown(initialSeconds) {
+    function startCountdown() {
         clearInterval(countdownInterval);
-        let seconds = initialSeconds >= 0 ? initialSeconds : 59; // 處理邊界情況
+        let seconds = 60;
         countdownTextEl.style.display = 'block';
         countdownTimerEl.textContent = seconds;
-
         countdownInterval = setInterval(() => {
             seconds--;
-            countdownTimerEl.textContent = Math.max(0, seconds);
-            if (seconds < 0) {
-                clearInterval(countdownInterval);
-                countdownTextEl.style.display = 'none';
-            }
+            countdownTimerEl.textContent = seconds;
+            if (seconds <= 0) clearInterval(countdownInterval);
         }, 1000);
     }
     
@@ -196,24 +190,32 @@ document.addEventListener('DOMContentLoaded', () => {
         JsBarcode("#barcode", discountCode, {
             format: "CODE128", lineColor: "#000", width: 2, height: 80, displayValue: true, fontSize: 18
         });
-        let seconds = parseInt(countdownTimerEl.textContent) || 60;
+        let seconds = 60;
         codeCountdownEl.textContent = seconds;
         const codeInterval = setInterval(() => {
             seconds--;
-            codeCountdownEl.textContent = Math.max(0, seconds);
+            codeCountdownEl.textContent = seconds;
             if (seconds <= 0 || codeModal.classList.contains('hidden')) {
                 clearInterval(codeInterval);
             }
         }, 1000);
     }
 
+    // 全新的、更穩健的啟動流程
     async function initialize() {
+        // 1. 立即初始化一個空的圖表
         sentimentChart = new Chart(ctx, chartConfig);
+
+        // 2. 透過 API 獲取並預先填滿圖表的歷史數據
         await initializeChartWithHistory();
         
-        // [UPDATE] 啟動全新的動態輪詢機制，取代舊的 setInterval
-        pollingLoop(); 
+        // 3. 獲取當前折扣 (這會更新 UI 並啟動倒數)
+        await fetchAndUpdateDiscount();
 
+        // 4. 設定每分鐘的折扣更新
+        mainInterval = setInterval(fetchAndUpdateDiscount, 60000);
+
+        // 5. 綁定按鈕事件
         generateCodeBtn.addEventListener('click', showBarcode);
         closeModalBtn.addEventListener('click', () => {
             codeModal.classList.add('hidden');
