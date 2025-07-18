@@ -231,7 +231,6 @@ def get_current_discount():
     
     db = SessionLocal()
     try:
-        print("[API] /api/current-discount 被呼叫")
         settings_query = db.query(DiscountSetting).all()
         settings = {s.setting_name: s.setting_value for s in settings_query}
         
@@ -240,25 +239,15 @@ def get_current_discount():
         conversion_factor = settings.get("conversion_factor", 0.5)
         discount_cap = settings.get("discount_cap", 25.0)
 
-        # [FIX] 改為使用 ID 排序，確保永遠抓到最新一筆
         latest_record = db.query(SentimentRecord).order_by(SentimentRecord.id.desc()).first()
         
         ppi_for_calculation = 0.0
         if latest_record:
             ppi_for_calculation = latest_record.ppi
-            print(f"[API] 找到最新一筆 PPI (ID: {latest_record.id}): {ppi_for_calculation:.2f}%")
-            
             if ppi_for_calculation == 0.0:
-                print("[API] 最新 PPI 為 0，正在嘗試回溯...")
-                # [FIX] 回溯時也使用 ID 排序
                 fallback_record = db.query(SentimentRecord).filter(SentimentRecord.ppi > 0).order_by(SentimentRecord.id.desc()).first()
                 if fallback_record:
                     ppi_for_calculation = fallback_record.ppi
-                    print(f"[API] 已成功回溯，使用最後一筆有效 PPI (ID: {fallback_record.id}): {ppi_for_calculation:.2f}%")
-                else:
-                    print("[API] 資料庫中無任何有效歷史數據，PPI 將使用 0。")
-        else:
-            print("[API] 資料庫中尚無任何數據，PPI 將使用 0。")
 
         extra_discount = 0
         if ppi_for_calculation < ppi_threshold:
@@ -267,30 +256,16 @@ def get_current_discount():
         final_discount = base_discount + extra_discount
         final_discount = min(final_discount, discount_cap)
 
+        # [NEW] 計算並回傳有效期限
+        valid_until_timestamp = time.time() + 60
+
         return {
             "current_ppi": round(ppi_for_calculation, 2),
             "final_discount_percentage": round(final_discount, 2),
-            "settings": settings
+            "settings": settings,
+            "valid_until": valid_until_timestamp
         }
     finally:
         db.close()
 
-@app.get("/api/history")
-def get_history(timescale: str = "realtime"):
-    if not db_ready or SessionLocal is None:
-        raise HTTPException(status_code=503, detail="服務正在初始化，請稍後再試。")
-    
-    db = SessionLocal()
-    try:
-        if timescale == "realtime":
-             # [FIX] 使用 ID 排序來確保拿到的是最新的數據
-             one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-             records = db.query(SentimentRecord).filter(SentimentRecord.timestamp >= one_hour_ago).order_by(SentimentRecord.id.asc()).all()
-             return [{"timestamp": r.timestamp.isoformat(), "ppi": r.ppi} for r in records]
-        
-        # ... (其餘彙總邏輯不變)
-        
-    finally:
-        db.close()
-
-# ... (其餘 API 和 WebSocket 邏輯與之前版本相同)
+# ... (其餘 API 端點與之前版本相同)
